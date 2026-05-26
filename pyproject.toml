@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "scan-to-ebook"
+version = "0.1.0"
+description = "Pipeline: scanned book pages (PNG/JPG) → epub via OpenRouter vision OCR"
+requires-python = ">=3.10"
+authors = [{ name = "phucnt" }]
+license = "MIT"
+readme = "README.md"
+keywords = ["ocr", "epub", "vision", "openrouter", "gemini"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Text Processing :: Markup",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+scan2ebook = "scan_to_ebook.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/scan_to_ebook"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

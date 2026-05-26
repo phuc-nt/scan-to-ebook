@@ -1,0 +1,236 @@
+"""CLI entry point: `scan2ebook <subcommand>`.
+
+Subcommands:
+    ocr <inbox-dir> <output-dir>            # Stage 1
+    post <ocr-dir> <book.md> --title ...    # Stage 2
+    epub <book.md> <book.epub>              # Stage 3
+    upload <book.epub>                      # Stage 4 (rclone gdrive)
+    all <inbox-dir>                         # 1+2+3 (4 optional)
+
+Inbox convention:
+    inbox/<slug>/
+        page_001.png, page_002.png, ...
+        metadata.json   # optional: {title, author, lang, year}
+        cover.jpg       # optional
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from . import drive_upload, epub_build, ocr, post_process
+
+
+def _load_metadata(book_dir: Path, slug: str) -> dict:
+    meta_file = book_dir / "metadata.json"
+    defaults = {"title": slug, "author": None, "lang": "vi", "year": None}
+    if not meta_file.exists():
+        return defaults
+    try:
+        with meta_file.open(encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"WARN metadata.json invalid: {exc} — using defaults", file=sys.stderr)
+        return defaults
+    return {
+        "title": d.get("title") or slug,
+        "author": d.get("author"),
+        "lang": d.get("lang") or "vi",
+        "year": d.get("year"),
+    }
+
+
+def _print_ocr_event(kind: str, payload: dict) -> None:
+    if kind == "start":
+        print(f"Total found: {payload['total']} | resumed (skipped): {payload['skipped']} | todo: {payload['todo']}")
+    elif kind == "page_ok":
+        print(f"  - {payload['page']}: ok latency={payload['latency_s']}s in={payload['in']} out={payload['out']} -> {payload['dst']}")
+    elif kind == "page_fail":
+        print(f"  - {payload['page']}: FAIL {payload['error']}", file=sys.stderr)
+    elif kind == "done":
+        print(f"\nDone. ok={payload['ok']} fail={payload['fail']} cost~${payload['cost_usd']}")
+
+
+def cmd_ocr(args: argparse.Namespace) -> int:
+    api_key = ocr.require_api_key()
+    summary = ocr.run_batch(
+        api_key=api_key,
+        input_dir=args.input.expanduser(),
+        output_dir=args.output.expanduser(),
+        model=args.model,
+        workers=args.workers,
+        pattern=args.pattern,
+        limit=args.limit,
+        on_event=_print_ocr_event,
+    )
+    return 0 if summary["fail"] == 0 else 1
+
+
+def cmd_post(args: argparse.Namespace) -> int:
+    stats = post_process.merge_pages(
+        input_dir=args.input.expanduser(),
+        output_path=args.output.expanduser(),
+        title=args.title,
+        author=args.author,
+        lang=args.lang,
+        year=args.year,
+        pattern=args.pattern,
+    )
+    print("Post-process done:")
+    for k, v in stats.items():
+        print(f"  {k}: {v}")
+    return 0
+
+
+def cmd_epub(args: argparse.Namespace) -> int:
+    result = epub_build.build_epub(
+        input_md=args.input.expanduser(),
+        output_epub=args.output.expanduser(),
+        cover=args.cover.expanduser() if args.cover else None,
+    )
+    size_kb = result["size_bytes"] // 1024
+    magic = "✓" if result["magic_ok"] else "WARN: not EPUB magic"
+    print(f"{magic} {result['output']} ({size_kb}KB)")
+    for w in result["pandoc_warnings"]:
+        print(f"  {w}", file=sys.stderr)
+    return 0 if result["magic_ok"] else 1
+
+
+def cmd_upload(args: argparse.Namespace) -> int:
+    result = drive_upload.upload(
+        local_path=args.path.expanduser(),
+        remote=args.remote,
+        folder=args.folder,
+        rename=args.rename,
+    )
+    print(f"Uploaded {result['local']} → {result['remote']}" + (f"/{result['rename']}" if result['rename'] else ""))
+    return 0
+
+
+def cmd_all(args: argparse.Namespace) -> int:
+    inbox_dir: Path = args.inbox.expanduser()
+    if not inbox_dir.is_dir():
+        print(f"inbox dir not found: {inbox_dir}", file=sys.stderr)
+        return 2
+    slug = inbox_dir.name
+    output_root = args.output.expanduser() if args.output else inbox_dir.parent.parent / "output" / slug
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    meta = _load_metadata(inbox_dir, slug)
+    print(f"==> {slug} | title={meta['title']!r}")
+
+    # Stage 1: OCR
+    api_key = ocr.require_api_key()
+    ocr_dir = output_root / "ocr"
+    summary = ocr.run_batch(
+        api_key=api_key,
+        input_dir=inbox_dir,
+        output_dir=ocr_dir,
+        workers=args.workers,
+        on_event=_print_ocr_event,
+    )
+    if summary["fail"] > 0:
+        print(f"\nOCR có {summary['fail']} page fail. Inspect rồi rerun `scan2ebook ocr` để retry, hoặc placeholder thủ công cho blank page.", file=sys.stderr)
+        return 1
+
+    # Stage 2: post-process
+    book_md = output_root / "book.md"
+    stats = post_process.merge_pages(
+        input_dir=ocr_dir,
+        output_path=book_md,
+        title=meta["title"],
+        author=meta["author"],
+        lang=meta["lang"],
+        year=meta["year"],
+    )
+    print(f"Merged: {stats['pages_merged']} pages, {stats['chars']} chars, h1={stats['h1']} h2={stats['h2']}")
+
+    # Stage 3: epub
+    book_epub = output_root / "book.epub"
+    cover = inbox_dir / "cover.jpg"
+    epub_result = epub_build.build_epub(
+        input_md=book_md,
+        output_epub=book_epub,
+        cover=cover if cover.exists() else None,
+    )
+    size_kb = epub_result["size_bytes"] // 1024
+    print(f"✓ {book_epub} ({size_kb}KB)")
+
+    # Stage 4: upload (optional)
+    if args.upload:
+        rename = f"{meta['title']}.epub"
+        drive_upload.upload(
+            local_path=book_epub,
+            remote=args.remote,
+            folder=args.folder,
+            rename=rename,
+        )
+        print(f"Uploaded to {args.remote}:{args.folder}/{rename}")
+
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="scan2ebook", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    # ocr
+    p_ocr = sub.add_parser("ocr", help="Stage 1: page images → per-page markdown")
+    p_ocr.add_argument("input", type=Path, help="inbox dir chứa PNG/JPG")
+    p_ocr.add_argument("output", type=Path, help="output dir cho .md")
+    p_ocr.add_argument("--model", default=ocr.DEFAULT_MODEL)
+    p_ocr.add_argument("--workers", type=int, default=4)
+    p_ocr.add_argument("--pattern", default="*.png")
+    p_ocr.add_argument("--limit", type=int, default=None, help="OCR tối đa N page đầu (smoke test)")
+    p_ocr.set_defaults(func=cmd_ocr)
+
+    # post
+    p_post = sub.add_parser("post", help="Stage 2: merge per-page md → book.md")
+    p_post.add_argument("input", type=Path, help="dir chứa page_*.md")
+    p_post.add_argument("output", type=Path, help="output book.md")
+    p_post.add_argument("--title", required=True)
+    p_post.add_argument("--author", default=None)
+    p_post.add_argument("--lang", default="vi")
+    p_post.add_argument("--year", default=None)
+    p_post.add_argument("--pattern", default="page_*.md")
+    p_post.set_defaults(func=cmd_post)
+
+    # epub
+    p_epub = sub.add_parser("epub", help="Stage 3: book.md → book.epub (pandoc)")
+    p_epub.add_argument("input", type=Path, help="book.md")
+    p_epub.add_argument("output", type=Path, help="book.epub")
+    p_epub.add_argument("--cover", type=Path, default=None)
+    p_epub.set_defaults(func=cmd_epub)
+
+    # upload
+    p_up = sub.add_parser("upload", help="Stage 4: epub → Google Drive (rclone)")
+    p_up.add_argument("path", type=Path, help="local epub")
+    p_up.add_argument("--remote", default=drive_upload.DEFAULT_REMOTE)
+    p_up.add_argument("--folder", default=drive_upload.DEFAULT_FOLDER)
+    p_up.add_argument("--rename", default=None)
+    p_up.set_defaults(func=cmd_upload)
+
+    # all
+    p_all = sub.add_parser("all", help="Stage 1+2+3 chain (4 optional via --upload)")
+    p_all.add_argument("inbox", type=Path, help="inbox/<slug>/ dir chứa PNG + metadata.json")
+    p_all.add_argument("--output", type=Path, default=None, help="output root (default: <inbox-parent>/../output/<slug>)")
+    p_all.add_argument("--workers", type=int, default=4)
+    p_all.add_argument("--upload", action="store_true", help="upload epub lên Drive sau khi build")
+    p_all.add_argument("--remote", default=drive_upload.DEFAULT_REMOTE)
+    p_all.add_argument("--folder", default=drive_upload.DEFAULT_FOLDER)
+    p_all.set_defaults(func=cmd_all)
+
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

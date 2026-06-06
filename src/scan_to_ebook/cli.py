@@ -18,10 +18,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 from . import drive_upload, epub_build, ocr, post_process
+
+# Giá ước lượng Gemini 3.1 Pro Preview ~$0.05/page (đo ở Phase 0, 1 ảnh A4).
+EST_COST_PER_PAGE = 0.05
 
 
 def _load_metadata(book_dir: Path, slug: str) -> dict:
@@ -48,22 +52,42 @@ def _print_ocr_event(kind: str, payload: dict) -> None:
         print(f"Total found: {payload['total']} | resumed (skipped): {payload['skipped']} | todo: {payload['todo']}")
     elif kind == "page_ok":
         print(f"  - {payload['page']}: ok latency={payload['latency_s']}s in={payload['in']} out={payload['out']} -> {payload['dst']}")
+    elif kind == "page_blank":
+        print(f"  - {payload['page']}: blank → placeholder {payload['dst']}")
     elif kind == "page_fail":
         print(f"  - {payload['page']}: FAIL {payload['error']}", file=sys.stderr)
     elif kind == "done":
-        print(f"\nDone. ok={payload['ok']} fail={payload['fail']} cost~${payload['cost_usd']}")
+        print(f"\nDone. ok={payload['ok']} blank={payload['blank']} fail={payload['fail']} cost~${payload['cost_usd']}")
+
+
+def _print_dry_run(input_dir: Path, output_dir: Path, pattern: str, limit: int | None) -> int:
+    """Đếm page todo (chưa OCR) + ước lượng chi phí, KHÔNG gọi API."""
+    if not input_dir.is_dir():
+        print(f"input dir not found: {input_dir}", file=sys.stderr)
+        return 2
+    todo, total = ocr.collect_pending_pages(input_dir, pattern, output_dir, limit)
+    skipped = total - len(todo)
+    est = len(todo) * EST_COST_PER_PAGE
+    print(f"[dry-run] pattern={pattern!r} total={total} resumed(skipped)={skipped} todo={len(todo)}")
+    print(f"[dry-run] ước lượng chi phí: {len(todo)} page × ${EST_COST_PER_PAGE:.2f} ≈ ${est:.2f}")
+    return 0
 
 
 def cmd_ocr(args: argparse.Namespace) -> int:
+    input_dir = args.input.expanduser()
+    output_dir = args.output.expanduser()
+    if args.dry_run:
+        return _print_dry_run(input_dir, output_dir, args.pattern, args.limit)
     api_key = ocr.require_api_key()
     summary = ocr.run_batch(
         api_key=api_key,
-        input_dir=args.input.expanduser(),
-        output_dir=args.output.expanduser(),
+        input_dir=input_dir,
+        output_dir=output_dir,
         model=args.model,
         workers=args.workers,
         pattern=args.pattern,
         limit=args.limit,
+        max_tokens=args.max_tokens,
         on_event=_print_ocr_event,
     )
     return 0 if summary["fail"] == 0 else 1
@@ -117,6 +141,11 @@ def cmd_all(args: argparse.Namespace) -> int:
         return 2
     slug = inbox_dir.name
     output_root = args.output.expanduser() if args.output else inbox_dir.parent.parent / "output" / slug
+    ocr_dir = output_root / "ocr"
+
+    if args.dry_run:
+        return _print_dry_run(inbox_dir, ocr_dir, "*.png", None)
+
     output_root.mkdir(parents=True, exist_ok=True)
 
     meta = _load_metadata(inbox_dir, slug)
@@ -124,17 +153,21 @@ def cmd_all(args: argparse.Namespace) -> int:
 
     # Stage 1: OCR
     api_key = ocr.require_api_key()
-    ocr_dir = output_root / "ocr"
     summary = ocr.run_batch(
         api_key=api_key,
         input_dir=inbox_dir,
         output_dir=ocr_dir,
+        model=args.model,
         workers=args.workers,
+        max_tokens=args.max_tokens,
         on_event=_print_ocr_event,
     )
+    # Blank page đã auto-placeholder (không tính fail). Chỉ abort khi còn fail thật.
     if summary["fail"] > 0:
-        print(f"\nOCR có {summary['fail']} page fail. Inspect rồi rerun `scan2ebook ocr` để retry, hoặc placeholder thủ công cho blank page.", file=sys.stderr)
+        print(f"\nOCR có {summary['fail']} page fail. Inspect rồi rerun `scan2ebook ocr` để retry.", file=sys.stderr)
         return 1
+    if summary["blank"] > 0:
+        print(f"OCR: {summary['blank']} blank page → placeholder, tiếp tục build.")
 
     # Stage 2: post-process
     book_md = output_root / "book.md"
@@ -146,7 +179,7 @@ def cmd_all(args: argparse.Namespace) -> int:
         lang=meta["lang"],
         year=meta["year"],
     )
-    print(f"Merged: {stats['pages_merged']} pages, {stats['chars']} chars, h1={stats['h1']} h2={stats['h2']}")
+    print(f"Merged: {stats['pages_merged']} pages, {stats['chars']} chars, h1={stats['h1']} h2={stats['h2']} footnotes={stats['footnotes']}")
 
     # Stage 3: epub
     book_epub = output_root / "book.epub"
@@ -181,10 +214,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_ocr = sub.add_parser("ocr", help="Stage 1: page images → per-page markdown")
     p_ocr.add_argument("input", type=Path, help="inbox dir chứa PNG/JPG")
     p_ocr.add_argument("output", type=Path, help="output dir cho .md")
-    p_ocr.add_argument("--model", default=ocr.DEFAULT_MODEL)
+    p_ocr.add_argument("--model", default=os.environ.get("OCR_MODEL", ocr.DEFAULT_MODEL))
     p_ocr.add_argument("--workers", type=int, default=4)
     p_ocr.add_argument("--pattern", default="*.png")
     p_ocr.add_argument("--limit", type=int, default=None, help="OCR tối đa N page đầu (smoke test)")
+    p_ocr.add_argument("--max-tokens", type=int, default=12000, help="max output tokens / page")
+    p_ocr.add_argument("--dry-run", action="store_true", help="đếm page + ước lượng chi phí, không gọi API")
     p_ocr.set_defaults(func=cmd_ocr)
 
     # post
@@ -217,7 +252,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_all = sub.add_parser("all", help="Stage 1+2+3 chain (4 optional via --upload)")
     p_all.add_argument("inbox", type=Path, help="inbox/<slug>/ dir chứa PNG + metadata.json")
     p_all.add_argument("--output", type=Path, default=None, help="output root (default: <inbox-parent>/../output/<slug>)")
+    p_all.add_argument("--model", default=os.environ.get("OCR_MODEL", ocr.DEFAULT_MODEL))
     p_all.add_argument("--workers", type=int, default=4)
+    p_all.add_argument("--max-tokens", type=int, default=12000, help="max output tokens / page")
+    p_all.add_argument("--dry-run", action="store_true", help="đếm page + ước lượng chi phí, không gọi API")
     p_all.add_argument("--upload", action="store_true", help="upload epub lên Drive sau khi build")
     p_all.add_argument("--remote", default=drive_upload.DEFAULT_REMOTE)
     p_all.add_argument("--folder", default=drive_upload.DEFAULT_FOLDER)

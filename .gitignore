@@ -7,6 +7,16 @@ output/
 *.epub
 *.md.bak
 
+# Test data (scanned images ~180MB) + generated OCR output
+tests/input/
+tests/output*/
+
+# Agent config / working dirs (local only)
+.claude/
+plans/
+CLAUDE.md
+AGENTS.md
+
 # Python
 __pycache__/
 *.pyc

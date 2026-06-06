@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -21,6 +22,26 @@ from urllib import error as urlerr, request as urlreq
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "google/gemini-3.1-pro-preview"
+
+# Placeholder ghi cho trang trống thật (giấy trắng/divider). Quy ước AGENTS.md.
+BLANK_PLACEHOLDER = "<!-- blank page -->"
+# Marker error nhận diện trang trống thật: model trả rỗng VÀ finish_reason=stop
+# (tự kết thúc, không phải lỗi/cắt). Không retry — retry trang trắng vô ích.
+_BLANK_MARKER = "blank page (empty + finish_reason=stop)"
+
+_NUM_RE = re.compile(r"\d+")
+
+
+def natural_sort_key(path: Path) -> tuple:
+    """Sort key tách số trong filename để `page_9` < `page_10` (không lexical).
+
+    Filename không zero-pad (page_5..page_80) → `sorted()` string xếp sai
+    (page_10 trước page_5). Tách các cụm số thành int để sort đúng số học.
+    Tie-break bằng stem để ổn định khi không có số.
+    """
+    stem = path.stem
+    nums = tuple(int(n) for n in _NUM_RE.findall(stem))
+    return (nums, stem)
 
 PROMPT = """Bạn là OCR engine cho sách/tạp chí tiếng Việt.
 
@@ -49,10 +70,21 @@ class PageResult:
     prompt_tokens: int
     completion_tokens: int
     error: str | None
+    is_blank: bool = False  # trang trống thật → ghi placeholder, không tính fail
 
 
 def _encode_image(path: Path) -> str:
     return base64.b64encode(path.read_bytes()).decode("ascii")
+
+
+def _atomic_write(dst: Path, text: str) -> None:
+    """Ghi qua file tạm rồi os.replace — tránh file nửa-ghi nếu bị kill giữa chừng.
+
+    Resume check dùng size>0; file nửa-ghi non-empty sẽ bị skip → bake corrupt.
+    Atomic rename loại bỏ edge case này."""
+    tmp = dst.with_suffix(dst.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, dst)
 
 
 def _detect_mime(path: Path) -> str:
@@ -97,13 +129,20 @@ def _post_once(api_key: str, model: str, image_b64: str, mime: str, max_tokens: 
     t0 = time.time()
     try:
         with urlreq.urlopen(req, timeout=300) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
+            raw = resp.read().decode("utf-8")
     except urlerr.HTTPError as exc:
         try:
             err_body = exc.read().decode("utf-8", errors="replace")[:500]
         except Exception:
             err_body = "<unreadable>"
         raise RuntimeError(f"HTTP {exc.code} {exc.reason}: {err_body}") from exc
+    # Response body đôi khi bị cắt/malformed (provider stream lỗi) → JSONDecodeError.
+    # Đây là transient (trang text dày, response lớn dễ đứt), không phải config error.
+    # Gắn marker "malformed response" để ocr_page retry thay vì raise luôn.
+    try:
+        body = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"malformed response (JSON parse): {exc} | body[:200]={raw[:200]!r}") from exc
     latency = time.time() - t0
 
     if "choices" not in body or not body["choices"]:
@@ -114,10 +153,29 @@ def _post_once(api_key: str, model: str, image_b64: str, mime: str, max_tokens: 
     text = msg.get("content")
     if text is None or not text.strip():
         finish = body["choices"][0].get("finish_reason", "unknown")
+        # finish_reason=stop + rỗng = trang trống thật (model xem xong, không có gì).
+        # Phân biệt với rỗng do lỗi/cắt (finish khác) → cái sau vẫn transient retry.
+        if finish == "stop":
+            raise RuntimeError(_BLANK_MARKER)
         raise RuntimeError(f"empty content (finish_reason={finish})")
 
     usage = body.get("usage", {})
     return text, {"latency_s": round(latency, 2), "usage": usage}
+
+
+def _is_transient(msg: str) -> bool:
+    """Lỗi tạm → đáng retry: 429/5xx/timeout/empty/malformed JSON.
+
+    Blank page (empty + finish_reason=stop) KHÔNG transient — trang trống thật,
+    run_batch ghi placeholder. 4xx config/auth cũng không retry.
+    """
+    return (
+        "HTTP 429" in msg
+        or "HTTP 5" in msg
+        or "timed out" in msg.lower()
+        or "empty content" in msg
+        or "malformed response" in msg
+    ) and _BLANK_MARKER not in msg
 
 
 def ocr_page(
@@ -125,11 +183,13 @@ def ocr_page(
     model: str,
     image_path: Path,
     retries: int = 2,
-    max_tokens: int = 8000,
+    max_tokens: int = 12000,
 ) -> tuple[str, dict]:
     """Single page OCR với retry exponential backoff cho transient error.
 
-    Retry trên 429/5xx/timeout/empty content. Không retry trên 4xx khác."""
+    Retry trên 429/5xx/timeout/empty content/malformed JSON. Không retry trên
+    4xx khác, cũng không retry blank page (empty+finish_reason=stop) — trang
+    trống thật, run_batch sẽ ghi placeholder."""
     image_b64 = _encode_image(image_path)
     mime = _detect_mime(image_path)
     last_exc: Exception | None = None
@@ -138,14 +198,7 @@ def ocr_page(
             return _post_once(api_key, model, image_b64, mime, max_tokens)
         except RuntimeError as exc:
             last_exc = exc
-            msg = str(exc)
-            transient = (
-                "HTTP 429" in msg
-                or "HTTP 5" in msg
-                or "timed out" in msg.lower()
-                or "empty content" in msg
-            )
-            if not transient or attempt == retries:
+            if not _is_transient(str(exc)) or attempt == retries:
                 raise
             wait = 2 ** attempt + (attempt * 0.5)  # 1, 2.5, 5s
             time.sleep(wait)
@@ -157,7 +210,7 @@ def collect_pending_pages(
     input_dir: Path, pattern: str, output_dir: Path, limit: int | None
 ) -> tuple[list[Path], int]:
     """Glob input, sort, filter pages đã có output non-empty. Returns (todo, total)."""
-    pages = sorted(input_dir.glob(pattern))
+    pages = sorted(input_dir.glob(pattern), key=natural_sort_key)
     todo = []
     for p in pages:
         md_path = output_dir / f"{p.stem}.md"
@@ -178,7 +231,7 @@ def run_batch(
     workers: int = 4,
     pattern: str = "*.png",
     limit: int | None = None,
-    max_tokens: int = 8000,
+    max_tokens: int = 12000,
     on_event=None,
 ) -> dict:
     """Run OCR batch. Returns summary dict.
@@ -195,10 +248,10 @@ def run_batch(
         on_event("start", {"total": total, "skipped": skipped, "todo": len(todo)})
 
     if not todo:
-        return {"ok": 0, "fail": 0, "skipped": skipped, "total": total, "cost_usd": 0.0}
+        return {"ok": 0, "fail": 0, "blank": 0, "skipped": skipped, "total": total, "cost_usd": 0.0}
 
     total_in = total_out = 0
-    ok_count = fail_count = 0
+    ok_count = fail_count = blank_count = 0
     failures: list[tuple[str, str]] = []
 
     def work(page_path: Path) -> PageResult:
@@ -214,13 +267,25 @@ def run_batch(
                 error=None,
             )
         except Exception as exc:
+            msg = str(exc)
+            if _BLANK_MARKER in msg:
+                # Trang trống thật: ghi placeholder, đánh dấu blank (không phải fail).
+                return PageResult(
+                    page_path=page_path,
+                    markdown=BLANK_PLACEHOLDER,
+                    latency_s=0,
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    error=None,
+                    is_blank=True,
+                )
             return PageResult(
                 page_path=page_path,
                 markdown=None,
                 latency_s=0,
                 prompt_tokens=0,
                 completion_tokens=0,
-                error=str(exc),
+                error=msg,
             )
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -234,7 +299,12 @@ def run_batch(
                     on_event("page_fail", {"page": r.page_path.name, "error": r.error})
                 continue
             dst = output_dir / f"{r.page_path.stem}.md"
-            dst.write_text(r.markdown, encoding="utf-8")
+            _atomic_write(dst, r.markdown)
+            if r.is_blank:
+                blank_count += 1
+                if on_event:
+                    on_event("page_blank", {"page": r.page_path.name, "dst": dst.name})
+                continue
             total_in += r.prompt_tokens
             total_out += r.completion_tokens
             ok_count += 1
@@ -256,6 +326,7 @@ def run_batch(
     summary = {
         "ok": ok_count,
         "fail": fail_count,
+        "blank": blank_count,
         "skipped": skipped,
         "total": total,
         "tokens_in": total_in,

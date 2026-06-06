@@ -4,9 +4,9 @@
 
 Pipeline chia thành 4 stage tuần tự, mỗi stage là một module Python độc lập trong `src/scan_to_ebook/`. Mỗi stage đọc filesystem state của stage trước và ghi output xuống filesystem cho stage sau. Không có in-memory queue, không có database, không có process daemon.
 
-Stage 1 là OCR. Input là một thư mục PNG/JPG, mỗi file là một trang. Output là một thư mục `.md`, mỗi trang một file `page_NNN.md`. Module này gọi OpenRouter API qua urllib stdlib (không có httpx/requests dependency), encode ảnh base64, gửi prompt verified cho Gemini 3.1 Pro Preview, nhận markdown thuần về. ThreadPoolExecutor chạy 4 worker song song (configurable `--workers`) để tận dụng concurrent HTTP. Resumable: trước khi gọi API cho mỗi trang, check xem `output/page_NNN.md` đã có và non-empty chưa, nếu có thì skip. Retry 2 lần với exponential backoff (1s, 2.5s, 5s) trên transient errors (HTTP 429, HTTP 5xx, timeout, empty content).
+Stage 1 là OCR. Input là một thư mục PNG/JPG, mỗi file là một trang. Output là một thư mục `.md`, mỗi trang một file `page_NNN.md`. Module này gọi OpenRouter API qua urllib stdlib (không có httpx/requests dependency), encode ảnh base64, gửi prompt verified cho Gemini 3.1 Pro Preview, nhận markdown thuần về. ThreadPoolExecutor chạy 4 worker song song (configurable `--workers`) để tận dụng concurrent HTTP. Resumable: trước khi gọi API cho mỗi trang, check xem `output/page_NNN.md` đã có và non-empty chưa, nếu có thì skip. File `.md` ghi atomic (tmp + `os.replace`) để write bị ngắt giữa chừng không để lại file nửa-ghi đánh lừa resume check. Retry 2 lần với exponential backoff (1s, 2.5s, 5s) trên transient errors (HTTP 429, HTTP 5xx, timeout, empty content, malformed JSON). Trang trống thật (response rỗng + `finish_reason=stop`) KHÔNG retry mà tự ghi placeholder `<!-- blank page -->`, không tính fail. CLI hỗ trợ `--dry-run` (đếm trang todo + ước lượng chi phí, không gọi API), `--max-tokens` (default 12000), và env `OCR_MODEL` override model mặc định.
 
-Stage 2 là post-process. Input là thư mục `.md` từ stage 1. Output là một file `book.md` đơn lẻ với YAML front matter. Module này merge tất cả `page_*.md` theo thứ tự filename, strip `` ```markdown `` wrapper nếu model lỡ thêm dù prompt cấm, detect chapter heading bằng regex (CHƯƠNG / Chương / PHẦN / Phần + số La Mã hoặc decimal) rồi promote thành h1, và inject YAML metadata (title, author, lang, year) để pandoc dùng. Cross-page hyphen-fix intentionally dropped — sẽ giải thích ở phần Design decisions.
+Stage 2 là post-process. Input là thư mục `.md` từ stage 1. Output là một file `book.md` đơn lẻ với YAML front matter. Module này merge tất cả `page_*.md` theo thứ tự filename (natural-sort số học), strip `` ```markdown `` wrapper nếu model lỡ thêm dù prompt cấm, renumber footnote cross-page (mỗi trang OCR đánh `[^1]` độc lập → shift theo counter chạy để `book.md` không đụng số, tránh pandoc "Duplicate note reference"; bỏ qua `[^N]` trong fenced code block), detect chapter heading bằng regex (CHƯƠNG / Chương / PHẦN / Phần / HỒI / QUYỂN / THIÊN + số La Mã, decimal, hoặc số viết chữ như "thứ nhất", "mười") rồi promote thành h1, và inject YAML metadata (title, author, lang, year) để pandoc dùng. Cross-page hyphen-fix intentionally dropped — sẽ giải thích ở phần Design decisions.
 
 Stage 3 là epub build. Input là `book.md`. Output là `book.epub`. Module này subprocess pandoc với flags `--toc --toc-depth=2 --split-level=1`. Pandoc đọc YAML front matter làm metadata, chia spine theo `# ` heading, sinh TOC tự động. Optional `cover.jpg` embed qua `--epub-cover-image`. Sau khi build, kiểm tra file magic bằng `file` command để đảm bảo output thực sự là EPUB chứ không phải file rỗng do pandoc lỗi.
 
@@ -76,6 +76,8 @@ Vì sao ThreadPoolExecutor chứ không async? OpenRouter rate limit khoảng 60
 
 Vì sao resumable qua filesystem state thay vì SQLite/Redis? Một file `.md` per page là source of truth tự nhiên cho stage 2 đọc anyway. Check `.exists()` + `.size > 0` là idempotency check đủ tốt. Không có database = không có migration, không có corrupt state, không có lock contention.
 
+Vì sao natural-sort thay vì `sorted()` mặc định? Filename scan thường không zero-pad (`page_5`..`page_80`). `sorted()` so sánh string nên xếp `page_10` trước `page_5`, đẩy trang đầu sách (bìa, mục lục) xuống cuối `book.md` — sai thứ tự đọc, silent. `natural_sort_key()` (trong `ocr.py`) tách cụm số trong filename thành int rồi sort số học. Dùng chung cho cả `collect_pending_pages` (OCR order) và `merge_pages` (book order). Stem không có số sort trước (tie-break bằng stem) — an toàn cho cover/intro page.
+
 Vì sao cross-page hyphen-fix bị drop? Corpus tiếng Việt cổ (Nam Phong 1917) dùng hyphen có chủ đích cho từ ghép như "văn-chương", "nhân-loại", "luân-lý". Pattern auto-nối `word-\n\s*word` ở biên page sẽ corrupt "văn-chương" thành "vănchương" khi từ này rơi đúng biên trang — silent corruption, khó detect, regression chính tả. OCR prompt rule 8 đã handle hyphen line-break trong page (an toàn vì hyphen line-break dễ nhận biết hơn). Cross-page hyphen rất hiếm, không an toàn auto-fix.
 
 Vì sao pandoc CLI thay vì ebooklib Python? Pandoc xử lý markdown→epub tốt nhất hiện có, đặc biệt với footnote, TOC, YAML metadata. Ebooklib cần code wrapper dài hơn, support kém hơn. Pandoc là 1 brew/apt package, available trên macOS/Linux/Windows. Subprocess overhead negligible so với OCR cost.
@@ -98,7 +100,9 @@ Mỗi stage raise exception khi fatal (input không tồn tại, API auth fail, 
 
 Stage 1 không raise khi 1 page fail — chỉ count vào `summary['failures']` và print stderr per-page. Mục đích: cho phép pipeline tiếp tục các page khác, user retry sau (resumable). CLI return code 1 nếu có bất kỳ fail nào, để shell script biết.
 
-Stage 1 retry tự động 2 lần trên transient (429, 5xx, timeout, empty content). Sau retry vẫn fail thì raise exception, count vào failures. Non-transient (403, 400, 401) fail luôn lần đầu — không retry vì là config/auth/quota error, retry vô ích.
+Stage 1 retry tự động 2 lần trên transient (429, 5xx, timeout, empty content, malformed JSON response). Sau retry vẫn fail thì raise exception, count vào failures. Non-transient (403, 400, 401) fail luôn lần đầu — không retry vì là config/auth/quota error, retry vô ích.
+
+Malformed JSON response (body bị cắt/đứt giữa chừng do provider stream lỗi) tính là transient: trang text dày response lớn dễ bị truncate, retry thường thành công. `_post_once` wrap `json.loads` trong try/except, re-raise với marker `malformed response` để `ocr_page` nhận diện. `max_tokens` default 12000 (tăng từ 8000) để trang dày không chạm trần token gây cắt output.
 
 ## Module boundaries
 
@@ -114,7 +118,7 @@ Stage 1 retry tự động 2 lần trên transient (429, 5xx, timeout, empty con
 
 ## Testing strategy
 
-Hiện tại chưa có test suite. Test thủ công bằng pilot Nam Phong 1917 (75 trang, có sẵn ở `~/.hermes/profiles/scan-to-ebook/inbox/namphong-q01-full/`). Future test suite nên có:
+Có `tests/test_page_order_and_retry.py` (pytest) cover 2 regression: natural-sort page order (sort key, merge order, collect order) và retry classification (transient incl. malformed JSON retry tới 3 lần; non-transient 4xx fail ngay). Chạy `python -m pytest`. Test thủ công bằng pilot Nam Phong 1917 (75 trang, có ở `tests/input/Nam Phong Tap Chi Q01_QN_001-006_T001/`). Future test suite nên thêm:
 
 Unit test cho `post_process.py` (chapter detection, code fence strip, YAML build) — pure function, không cần fixture lớn.
 

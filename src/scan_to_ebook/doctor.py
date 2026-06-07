@@ -14,6 +14,8 @@ import shutil
 import subprocess
 import sys
 
+from . import image_ops
+
 
 def _check_python() -> dict:
     """Python >= 3.10 và package import được (đang chạy ⇒ import OK)."""
@@ -58,9 +60,21 @@ def _check_rclone() -> dict:
             "detail": "not installed (upload disabled, optional)"}
 
 
+def _check_heic() -> dict:
+    """Backend convert HEIC optional — chỉ cần khi import ảnh iPhone (.heic/.heif).
+
+    Vắng = warning (sách JPG/PNG vẫn chạy). Có ≥1 backend → liệt kê cái khả dụng."""
+    backends = image_ops.available_backends()
+    if backends:
+        return {"name": "heic_convert", "ok": True, "essential": False,
+                "detail": f"available: {', '.join(backends)}"}
+    return {"name": "heic_convert", "ok": False, "essential": False,
+            "detail": f"none (HEIC import disabled). {image_ops._install_hint()}"}
+
+
 def run_checks() -> list[dict]:
     """Chạy tất cả check. Trả list dict{name, ok, essential, detail}. Không in gì."""
-    return [_check_python(), _check_pandoc(), _check_key(), _check_rclone()]
+    return [_check_python(), _check_pandoc(), _check_key(), _check_heic(), _check_rclone()]
 
 
 def all_essential_ok(results: list[dict]) -> bool:

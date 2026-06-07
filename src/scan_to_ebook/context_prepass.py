@@ -19,14 +19,13 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 import tempfile
 import time
 from pathlib import Path
 from urllib import error as urlerr
 from urllib import request as urlreq
 
-from . import ocr
+from . import image_ops, ocr
 
 MAX_SAMPLE = 15
 CONTEXT_MAX_TOKENS = 8000
@@ -95,24 +94,18 @@ def _strip_json_fence(raw: str) -> str:
 
 
 def _encode_sample(path: Path) -> tuple[str, str]:
-    """Encode 1 ảnh mẫu cho pre-pass, downscale ~SAMPLE_MAX_DIM bằng sips nếu có.
+    """Encode 1 ảnh mẫu cho pre-pass, downscale ~SAMPLE_MAX_DIM cross-platform.
 
     Trả (b64, mime). Downscale vào file TẠM (xoá ngay sau encode) → không đụng ảnh
-    gốc. sips vắng (Linux/CI) hoặc fail → fallback encode ảnh gốc full-res (có thể
-    413 với ảnh lớn, nhưng macOS luôn có sips). Output JPEG để nhẹ + đồng nhất mime."""
-    if shutil.which("sips") is None:
-        return ocr._encode_image(path), ocr._detect_mime(path)
+    gốc. Delegate sang image_ops (sips/magick/pillow-heif). Backend vắng hoặc fail
+    → fallback encode ảnh gốc full-res (downscale chỉ là tối ưu cost, không bắt buộc).
+    Output JPEG để nhẹ + đồng nhất mime."""
     tmp_dir = tempfile.mkdtemp(prefix="s2e_prepass_")
     tmp = Path(tmp_dir) / "sample.jpg"
     try:
-        result = subprocess.run(
-            ["sips", "-s", "format", "jpeg", "-Z", str(SAMPLE_MAX_DIM),
-             str(path), "--out", str(tmp)],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0 or not tmp.exists():
-            return ocr._encode_image(path), ocr._detect_mime(path)
-        return ocr._encode_image(tmp), "image/jpeg"
+        if image_ops.downscale_to_jpeg(path, tmp, SAMPLE_MAX_DIM):
+            return ocr._encode_image(tmp), "image/jpeg"
+        return ocr._encode_image(path), ocr._detect_mime(path)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -326,14 +319,21 @@ def load_context(book_dir: Path) -> dict | None:
 def run_prepass(
     api_key: str,
     model: str,
-    inbox_dir: Path,
+    images_dir: Path,
     pattern: str,
     max_tokens: int = CONTEXT_MAX_TOKENS,
+    *,
+    out_dir: Path | None = None,
 ) -> dict:
     """Orchestrator resume-aware. Returns context/block/cost/tokens/from_cache.
 
-    Cache hit (context.json) → re-derive block, cost 0, KHÔNG gọi API."""
-    cached = load_context(inbox_dir)
+    `images_dir`: nơi ĐỌC ảnh mẫu (zone scans). `out_dir`: nơi GHI/ĐỌC cache
+    context.{json,md} (zone work). Tách read/write → cache không nằm cạnh nguồn
+    (tránh bị clean-room wipe + đúng zone). out_dir=None → dùng images_dir (back-compat).
+
+    Cache hit (context.json ở out_dir) → re-derive block, cost 0, KHÔNG gọi API."""
+    cache_dir = out_dir if out_dir is not None else images_dir
+    cached = load_context(cache_dir)
     if cached is not None:
         return {
             "context": cached,
@@ -344,14 +344,14 @@ def run_prepass(
             "from_cache": True,
         }
 
-    pages = sorted(ocr._glob_patterns(inbox_dir, pattern), key=ocr.natural_sort_key)
+    pages = sorted(ocr._glob_patterns(images_dir, pattern), key=ocr.natural_sort_key)
     if not pages:
         raise RuntimeError("no images for context pre-pass")
 
     samples = select_sample_pages(pages)
     ctx, meta = extract_context(api_key, model, samples, max_tokens)
     block = render_block(ctx)
-    save_context(inbox_dir, ctx, block)
+    save_context(cache_dir, ctx, block)
 
     usage = meta.get("usage", {})
     tokens_in = usage.get("prompt_tokens", 0)

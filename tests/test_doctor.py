@@ -104,7 +104,8 @@ def test_cmd_doctor_json_parseable(monkeypatch, capsys):
     assert rc == 0
     obj = json.loads(capsys.readouterr().out.strip())
     assert obj["status"] == "ok"
-    assert {c["name"] for c in obj["checks"]} == {"python", "pandoc", "openrouter_key", "rclone"}
+    assert {c["name"] for c in obj["checks"]} == {
+        "python", "pandoc", "openrouter_key", "heic_convert", "rclone"}
 
 
 def test_cmd_doctor_json_status_fail(monkeypatch, capsys):

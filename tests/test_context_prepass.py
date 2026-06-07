@@ -270,6 +270,40 @@ def test_run_prepass_no_images_raises(tmp_path):
         context_prepass.run_prepass("k", "m", tmp_path, "*.png")
 
 
+def test_run_prepass_splits_read_and_cache_dirs(tmp_path, monkeypatch):
+    """Layout mới: ĐỌC ảnh từ scans/, GHI cache context.{json,md} vào work/.
+
+    Khoá fix tách zone — cache KHÔNG nằm cạnh nguồn (tránh clean-room wipe nhầm)."""
+    scans = tmp_path / "scans"
+    work = tmp_path / "work"
+    scans.mkdir()
+    work.mkdir()
+    _fake_pages(scans, 20)
+    _patch_post(monkeypatch, _valid_ctx_json())
+    res = context_prepass.run_prepass("k", "m", scans, "*.png", out_dir=work)
+    assert res["from_cache"] is False
+    # cache ghi vào work/, KHÔNG vào scans/ (nguồn sạch).
+    assert (work / "context.json").exists()
+    assert not (scans / "context.json").exists()
+
+
+def test_run_prepass_cache_hit_from_out_dir(tmp_path, monkeypatch):
+    """Cache hit đọc context.json từ out_dir (work/), không gọi API."""
+    scans = tmp_path / "scans"
+    work = tmp_path / "work"
+    scans.mkdir()
+    work.mkdir()
+    _fake_pages(scans, 3)
+    context_prepass.save_context(work, _valid_ctx(), "blk")
+    calls = []
+    monkeypatch.setattr(
+        context_prepass, "_post_context_once",
+        lambda *a, **k: calls.append(1) or ("x", {}),
+    )
+    res = context_prepass.run_prepass("k", "m", scans, "*.png", out_dir=work)
+    assert res["from_cache"] is True and calls == []
+
+
 def test_cost_accounting(tmp_path, monkeypatch):
     _fake_pages(tmp_path, 20)
 

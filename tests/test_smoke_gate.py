@@ -18,16 +18,20 @@ from scan_to_ebook import cli, ocr, pipeline
 
 
 def _make_inbox(tmp_path: Path, n_pages: int = 20) -> Path:
-    inbox = tmp_path / "inbox" / "testbook"
-    inbox.mkdir(parents=True)
+    """Tạo book-home theo layout mới: <home>/testbook/scans/page_*.png. Trả book-home."""
+    book_home = tmp_path / "home" / "testbook"
+    scans = book_home / "scans"
+    scans.mkdir(parents=True)
     for i in range(1, n_pages + 1):
-        (inbox / f"page_{i:03d}.png").write_bytes(b"\x89PNG\r\n")
-    return inbox
+        (scans / f"page_{i:03d}.png").write_bytes(b"\x89PNG\r\n")
+    return book_home
 
 
-def _smoke_args(inbox: Path, output: Path, **over) -> argparse.Namespace:
+def _smoke_args(inbox: Path, _output=None, **over) -> argparse.Namespace:
+    """inbox = path tới book-home (chứa scans/). `_output` (positional cũ) bị bỏ qua:
+    layout mới resolve zones từ book-home path trực tiếp (không cần output root riêng)."""
     base = dict(
-        inbox=inbox, output=output, model="m", workers=2, max_tokens=12000,
+        inbox=inbox, home=None, output=None, model="m", workers=2, max_tokens=12000,
         dry_run=False, smoke=True, yes=False, upload=False,
         remote="r", folder="f", json=False, json_lines=False,
     )
@@ -56,13 +60,13 @@ def patched(monkeypatch):
         return {"ok": n, "fail": 0, "blank": 0, "skipped": 0,
                 "total": len(pages), "cost_usd": n * 0.05}
 
-    def fake_build_book(ocr_dir, output_root, inbox_dir, meta, *, suffix=""):
+    def fake_build_book(bp, scans_dir, meta, *, suffix=""):
         calls["build_book"] += 1
-        epub = Path(output_root) / f"book{suffix}.epub"
+        epub = (bp.work_dir / f"book{suffix}.epub") if suffix else (bp.dist_dir / f"{bp.book_home.name}.epub")
         return {"stats": {"pages_merged": 1, "chars": 1, "h1": 0, "h2": 0, "footnotes": 0},
                 "epub_result": {"size_bytes": 2048, "magic_ok": True, "output": str(epub),
                                 "pandoc_warnings": []},
-                "book_md": Path(output_root) / f"book{suffix}.md", "book_epub": epub}
+                "book_md": bp.work_dir / f"book{suffix}.md", "book_epub": epub}
 
     monkeypatch.setattr(ocr, "run_batch", fake_run_batch)
     # _build_book đã chuyển sang pipeline.py; smoke/full gate gọi nó qua namespace

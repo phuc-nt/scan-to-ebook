@@ -1,36 +1,57 @@
 # scan-to-ebook
 
-Pipeline biến sách giấy đã scan (PNG/JPG/HEIC/HEIF) thành epub đọc trên Books.app, Kindle. OCR qua OpenRouter vision model, post-process bằng Python stdlib, build epub bằng pandoc, upload Drive bằng rclone. HEIC/HEIF (iPhone default) tự convert→JPG tại import stage. Verified zero error trên corpus tiếng Việt cổ (Nam Phong 1917, 75 trang) + 152-image iPhone book (119 HEIC + 33 JPG).
+Turn scanned paper books (PNG/JPG/HEIC/HEIF) into EPUBs you can read in Books.app
+or on a Kindle. The pipeline runs OCR through an OpenRouter vision model,
+post-processes with the Python standard library, builds the EPUB with pandoc, and
+optionally uploads to Google Drive via rclone. HEIC/HEIF (the iPhone default) is
+auto-converted to JPG at import — cross-platform, trying `sips` (macOS) →
+ImageMagick `magick` → `heif-convert` → `pillow-heif` in order.
+
+Verified with zero OCR errors on hard Vietnamese corpora: an early-Quốc-ngữ
+journal (Nam Phong 1917, 75 pages) and a 152-image iPhone-scanned book
+(119 HEIC + 33 JPG).
+
+The runtime is **pure Python standard library** — no third-party packages
+required (pandoc and rclone are external CLIs).
 
 ## Quickstart
 
 ```bash
-brew install pandoc rclone
+brew install pandoc rclone           # macOS; on Linux use apt/your package manager
 git clone <repo> ~/workspace/scan-to-ebook && cd ~/workspace/scan-to-ebook
 python3 -m venv .venv && .venv/bin/pip install -e .
 cp .env.example .env && $EDITOR .env   # paste OPENROUTER_API_KEY=...
 
-# Verify setup: python/pandoc/key ready?
+# Verify your setup (python / pandoc / key / HEIC backend):
 .venv/bin/scan2ebook doctor
 
-# .env tự nạp (không cần source). Tạo inbox rồi chạy:
+# .env loads automatically (no `source` needed). Create a book, then run it:
 .venv/bin/scan2ebook init <your-book-slug> --from ~/path/to/scanned-images
-.venv/bin/scan2ebook all ~/Books-inbox/<your-book-slug> --smoke  # test 10 trang + estimate cost
-# Review smoke epub, confirm at prompt, full run tự tiếp tục
+.venv/bin/scan2ebook all <your-book-slug> --smoke   # OCR 10 pages + estimate full cost
+# Each book lives at ~/scan2ebook/<your-book-slug>/ with three zones:
+#   scans/  (source images — never auto-deleted)
+#   work/   (cache: context, OCR text, intermediate book.md)
+#   dist/   (the final <slug>.epub)
+# Review the smoke EPUB, confirm at the prompt, and the full run continues.
 ```
 
-## Tài liệu
+Pass `--yes` to skip the confirmation prompt, or `--upload` to push the finished
+EPUB to Google Drive (requires a configured rclone remote).
 
-- [Tổng quan sản phẩm](docs/product-overview.md) — vấn đề, đối tượng, value, non-goals
-- [Kiến trúc](docs/architecture.md) — pipeline 4 stage, data flow, design decisions
-- [Hướng dẫn người dùng](docs/user-guide.md) — cài đặt, chuẩn bị scan, chạy pipeline, chỉnh sửa
-- [Vận hành](docs/operations.md) — cost, OpenRouter credit/key cap, rclone, model swap, debugging
-- [Hướng dẫn cho coding agent](AGENTS.md) — interaction protocol cho LLM agent (Claude Code, Cursor)
+## Documentation
+
+- [Product overview](docs/product-overview.md) — problem, audience, value, non-goals
+- [Architecture](docs/architecture.md) — pipeline stages, data flow, design decisions
+- [User guide](docs/user-guide.md) — install, preparing scans, running the pipeline, editing
+- [Operations](docs/operations.md) — cost, OpenRouter credit/key caps, rclone, swapping models, debugging
 
 ## Legal
 
-Pipeline cho personal use với sách bạn sở hữu vật lý. Không publish output, không share epub ra ngoài thiết bị cá nhân. Vi phạm copyright là vấn đề người dùng tự chịu.
+This tool is for personal use with books you physically own. Do not publish its
+output or share generated EPUBs beyond your own devices. Copyright compliance is
+the user's responsibility. The sample files under [`samples/`](samples/) are short
+excerpts included only to demonstrate OCR quality, not a redistribution of any book.
 
-## Origin
+## License
 
-Forked từ Hermes Agent profile prototype (Phase 0-3 Nam Phong 1917 pilot, 5/2026). Standalone vì pipeline thuần stdlib + pandoc + rclone, không cần agent runtime.
+[MIT](LICENSE).

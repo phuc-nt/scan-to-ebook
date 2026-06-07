@@ -37,19 +37,19 @@ Một số trang sách thực sự blank: cover sau, divider giữa các chươn
 Sau khi pipeline báo failure cho blank page, mở ảnh xem có thực sự blank không.
 
 ```bash
-open ~/Books-inbox/<slug>/page_065.png
+open ~/scan2ebook/<slug>/scans/page_065.png
 ```
 
 Nếu thực sự blank, tạo placeholder thủ công để pipeline skip ở lần rerun.
 
 ```bash
-echo '<!-- blank page -->' > ~/output/<slug>/ocr/page_065.md
+echo '<!-- blank page -->' > ~/scan2ebook/<slug>/work/ocr/page_065.md
 ```
 
 Sau đó rerun để stage 1 skip trang đã có placeholder, và stage 2+3 chạy bình thường.
 
 ```bash
-scan2ebook all ~/Books-inbox/<slug>
+scan2ebook all <slug>
 ```
 
 Nếu trang KHÔNG blank nhưng pipeline vẫn báo empty content, có 2 khả năng. Một là vision model gặp safety filter (rare cho text Việt nhưng có thể gặp với sách political/religious). Hai là ảnh quá tối/quá mờ, model không đọc được. Thử rescan với DPI cao hơn, hoặc đổi model qua `--model anthropic/claude-opus-4`.
@@ -128,7 +128,7 @@ Prompt OCR ở `src/scan_to_ebook/ocr.py`, biến `PROMPT`. Đã verified zero e
 
 Lý do hợp lệ để tune prompt: ngôn ngữ khác (English, Japanese), genre rất khác (math heavy với LaTeX, music score), layout đặc biệt (newspaper 4 cột).
 
-Quy trình tune. Một là branch riêng. Hai là edit `PROMPT`. Ba là smoke test 20 trang Nam Phong từ `~/.hermes/profiles/scan-to-ebook/inbox/namphong-q01-full/` (đã có ground truth). Bốn là so diff với version cũ qua `git diff` hoặc dùng tool diff trực quan. Năm là chỉ merge khi diff acceptable (không corrupt chữ nào, không drop dấu).
+Quy trình tune. Một là branch riêng. Hai là edit `PROMPT`. Ba là smoke test 10–20 trang trên một cuốn có ground truth (ví dụ `samples/demo-scans/`, hoặc tự build fixture từ sách bạn sở hữu). Bốn là so diff với version cũ qua `git diff` hoặc dùng tool diff trực quan. Năm là chỉ merge khi diff acceptable (không corrupt chữ nào, không drop dấu).
 
 Nếu test corpus mới (sách khác), build ground truth bằng cách chạy version cũ + manual fix 20–50 trang, lưu thành regression fixture.
 
@@ -181,15 +181,15 @@ rclone config
 
 ## Backup
 
-Output folder không có backup tự động. User tự backup.
+Dist folder (final EPUB) không có backup tự động. User tự backup.
 
-Recommended: rclone sync entire output folder lên Drive định kỳ.
+Recommended: rclone sync entire scan2ebook folder lên Drive định kỳ. Scans zone quan trọng nhất vì không reproducible — nếu mất scans/, không thể rebuild.
 
 ```bash
-rclone sync ~/output/ gdrive:Backup/scan-to-ebook-output/ --progress
+rclone sync ~/scan2ebook/ gdrive:Backup/scan-to-ebook-books/ --progress
 ```
 
-Inbox PNG có thể backup bằng Time Machine (macOS) hoặc rclone tương tự. Inbox quan trọng hơn output vì chỉ inbox là không reproducible — output có thể rebuild từ inbox nếu còn OpenRouter credit.
+Scans PNG có thể backup bằng Time Machine (macOS) hoặc rclone tương tự. Work zone (cache + OCR temp) không cần backup — có thể xoá `rm -rf work/` bất kỳ lúc nào, chỉ tốn cost lại prepass (~$0.09).
 
 Loại trừ `.env` khỏi backup public.
 

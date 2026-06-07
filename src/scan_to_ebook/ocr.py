@@ -23,7 +23,7 @@ from urllib import error as urlerr, request as urlreq
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "google/gemini-3.1-pro-preview"
 
-# Placeholder ghi cho trang trống thật (giấy trắng/divider). Quy ước AGENTS.md.
+# Placeholder ghi cho trang trống thật (giấy trắng/divider).
 BLANK_PLACEHOLDER = "<!-- blank page -->"
 # Marker error nhận diện trang trống thật: model trả rỗng VÀ finish_reason=stop
 # (tự kết thúc, không phải lỗi/cắt). Không retry — retry trang trắng vô ích.

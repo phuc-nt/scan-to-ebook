@@ -1,0 +1,194 @@
+"""Tests cho smoke cost-gate (P3): `scan2ebook all <inbox> --smoke`.
+
+Invariant an toàn (CỐT LÕI): KHÔNG bao giờ tiêu cost full nếu chưa có `--yes`,
+interactive 'y', hoặc (non-tty) thì abort thay vì treo input().
+
+Chiến lược test: monkeypatch ocr.run_batch (đếm số lần gọi + limit) và
+cli._build_book (tránh pandoc thật) → kiểm soát luồng gate mà không gọi API/pandoc.
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import pytest
+
+from scan_to_ebook import cli, ocr
+
+
+def _make_inbox(tmp_path: Path, n_pages: int = 20) -> Path:
+    inbox = tmp_path / "inbox" / "testbook"
+    inbox.mkdir(parents=True)
+    for i in range(1, n_pages + 1):
+        (inbox / f"page_{i:03d}.png").write_bytes(b"\x89PNG\r\n")
+    return inbox
+
+
+def _smoke_args(inbox: Path, output: Path, **over) -> argparse.Namespace:
+    base = dict(
+        inbox=inbox, output=output, model="m", workers=2, max_tokens=12000,
+        dry_run=False, smoke=True, yes=False, upload=False,
+        remote="r", folder="f", json=False, json_lines=False,
+    )
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+@pytest.fixture
+def patched(monkeypatch):
+    """Patch run_batch + _build_book + require_api_key. Trả dict tracking."""
+    calls = {"run_batch": [], "build_book": 0}
+
+    def fake_run_batch(*, api_key, input_dir, output_dir, model, workers,
+                       pattern, limit=None, max_tokens, on_event=None):
+        calls["run_batch"].append({"limit": limit})
+        # giả lập đã OCR `limit` (hoặc tất cả) trang vào output_dir để
+        # collect_pending_pages đếm remaining đúng.
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        pages = sorted(Path(input_dir).glob("page_*.png"))
+        n = limit if limit is not None else len(pages)
+        for p in pages[:n]:
+            (Path(output_dir) / f"{p.stem}.md").write_text("x", encoding="utf-8")
+        if on_event:
+            on_event("start", {"total": len(pages), "skipped": 0, "todo": n})
+            on_event("done", {"ok": n, "blank": 0, "fail": 0, "cost_usd": n * 0.05})
+        return {"ok": n, "fail": 0, "blank": 0, "skipped": 0,
+                "total": len(pages), "cost_usd": n * 0.05}
+
+    def fake_build_book(ocr_dir, output_root, inbox_dir, meta, *, suffix=""):
+        calls["build_book"] += 1
+        epub = Path(output_root) / f"book{suffix}.epub"
+        return {"stats": {"pages_merged": 1, "chars": 1, "h1": 0, "h2": 0, "footnotes": 0},
+                "epub_result": {"size_bytes": 2048, "magic_ok": True, "output": str(epub),
+                                "pandoc_warnings": []},
+                "book_md": Path(output_root) / f"book{suffix}.md", "book_epub": epub}
+
+    monkeypatch.setattr(ocr, "run_batch", fake_run_batch)
+    monkeypatch.setattr(cli, "_build_book", fake_build_book)
+    monkeypatch.setattr(cli.ocr, "require_api_key", lambda: "sk-test")
+    return calls
+
+
+# ---------------------------------------------- safety: no full spend w/o approval
+
+def test_smoke_human_answer_no_aborts(patched, tmp_path, monkeypatch, capsys):
+    """Human, trả 'n' → smoke OCR (limit=10) rồi STOP. KHÔNG OCR full."""
+    inbox = _make_inbox(tmp_path, 20)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *a: "n")
+    rc = cli.cmd_all(_smoke_args(inbox, tmp_path / "out"))
+    assert rc == 0
+    # đúng 1 lần run_batch và là smoke (limit=10) — KHÔNG có lần full (limit=None).
+    assert patched["run_batch"] == [{"limit": 10}]
+    assert patched["build_book"] == 1  # chỉ mini epub
+
+
+def test_smoke_human_answer_yes_runs_full(patched, tmp_path, monkeypatch):
+    """Human, trả 'y' → smoke THEN full. 2 lần run_batch (limit=10, limit=None)."""
+    inbox = _make_inbox(tmp_path, 20)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+    rc = cli.cmd_all(_smoke_args(inbox, tmp_path / "out"))
+    assert rc == 0
+    limits = [c["limit"] for c in patched["run_batch"]]
+    assert limits == [10, None]  # smoke rồi full
+    assert patched["build_book"] == 2  # mini + final
+
+
+def test_smoke_yes_flag_skips_prompt(patched, tmp_path, monkeypatch):
+    """--yes → smoke THEN full, KHÔNG gọi input()."""
+    inbox = _make_inbox(tmp_path, 20)
+
+    def boom(*a):
+        raise AssertionError("input() không được gọi khi --yes")
+
+    monkeypatch.setattr("builtins.input", boom)
+    rc = cli.cmd_all(_smoke_args(inbox, tmp_path / "out", yes=True))
+    assert rc == 0
+    assert [c["limit"] for c in patched["run_batch"]] == [10, None]
+
+
+def test_smoke_non_tty_aborts_safely(patched, tmp_path, monkeypatch):
+    """Non-tty (pipe/CI) không --yes → abort an toàn, KHÔNG treo input(), KHÔNG full."""
+    inbox = _make_inbox(tmp_path, 20)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+    def boom(*a):
+        raise AssertionError("input() không được gọi khi non-tty")
+
+    monkeypatch.setattr("builtins.input", boom)
+    rc = cli.cmd_all(_smoke_args(inbox, tmp_path / "out"))
+    assert rc == 0
+    assert patched["run_batch"] == [{"limit": 10}]  # chỉ smoke
+
+
+# ---------------------------------------------------------- json gate
+
+def test_smoke_json_gate_returns_cost_exit0(patched, tmp_path, monkeypatch, capsys):
+    """--smoke --json (no --yes) → 1 summary {est_full_cost_usd}, exit 0, KHÔNG full."""
+    import json as _json
+
+    inbox = _make_inbox(tmp_path, 20)
+
+    def boom(*a):
+        raise AssertionError("input() không được gọi ở json mode")
+
+    monkeypatch.setattr("builtins.input", boom)
+    rc = cli.cmd_all(_smoke_args(inbox, tmp_path / "out", json=True))
+    assert rc == 0
+    assert patched["run_batch"] == [{"limit": 10}]  # KHÔNG full
+    out = capsys.readouterr().out.strip()
+    obj = _json.loads(out)  # stdout = đúng 1 JSON object
+    assert obj["status"] == "smoke"
+    assert obj["est_full_cost_usd"] == pytest.approx(0.5)  # 10 còn lại × 0.05
+    assert obj["remaining_pages"] == 10
+    assert "smoke_epub" in obj["paths"]
+
+
+def test_smoke_est_uses_measured_per_page_cost(tmp_path, monkeypatch, capsys):
+    """est_full_cost_usd suy từ cost THẬT của smoke (token-based), không phải flat $0.05.
+
+    Smoke OCR 10 trang tốn $2.00 → per_page=$0.20 → 10 trang còn lại → est=$2.00
+    (khác hẳn flat 10×0.05=$0.50)."""
+    import json as _json
+
+    inbox = _make_inbox(tmp_path, 20)
+
+    def fake_run_batch(*, api_key, input_dir, output_dir, model, workers,
+                       pattern, limit=None, max_tokens, on_event=None):
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        pages = sorted(Path(input_dir).glob("page_*.png"))
+        n = limit if limit is not None else len(pages)
+        for p in pages[:n]:
+            (Path(output_dir) / f"{p.stem}.md").write_text("x", encoding="utf-8")
+        if on_event:
+            on_event("start", {"total": len(pages), "skipped": 0, "todo": n})
+            on_event("done", {"ok": n, "blank": 0, "fail": 0, "cost_usd": 2.0})
+        return {"ok": n, "fail": 0, "blank": 0, "skipped": 0,
+                "total": len(pages), "cost_usd": 2.0}
+
+    monkeypatch.setattr(ocr, "run_batch", fake_run_batch)
+    monkeypatch.setattr(cli, "_build_book", lambda *a, **k: {
+        "stats": {"pages_merged": 1, "chars": 1, "h1": 0, "h2": 0, "footnotes": 0},
+        "epub_result": {"size_bytes": 2048, "magic_ok": True, "output": "x", "pandoc_warnings": []},
+        "book_md": tmp_path / "out" / "book.smoke.md", "book_epub": tmp_path / "out" / "book.smoke.epub"})
+    monkeypatch.setattr(cli.ocr, "require_api_key", lambda: "sk-test")
+
+    rc = cli.cmd_all(_smoke_args(inbox, tmp_path / "out", json=True))
+    assert rc == 0
+    obj = _json.loads(capsys.readouterr().out.strip())
+    # $2.00 / 10 ok = $0.20/trang × 10 còn lại = $2.00 (KHÔNG phải flat $0.50).
+    assert obj["est_full_cost_usd"] == pytest.approx(2.0)
+
+
+def test_smoke_fewer_than_10_pages(patched, tmp_path, monkeypatch, capsys):
+    """<10 trang: smoke OCR tất cả, remaining=0, est $0.00, gate vẫn hiện (json)."""
+    import json as _json
+
+    inbox = _make_inbox(tmp_path, 5)
+    rc = cli.cmd_all(_smoke_args(inbox, tmp_path / "out", json=True))
+    assert rc == 0
+    obj = _json.loads(capsys.readouterr().out.strip())
+    assert obj["remaining_pages"] == 0
+    assert obj["est_full_cost_usd"] == 0.0

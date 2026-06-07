@@ -57,7 +57,9 @@ Trả về DUY NHẤT một JSON object (không giải thích, không ```json wr
   "ocr_pitfalls": ["lỗi OCR dễ gặp với font/chính tả sách này"]
 }
 
-Quy tắc: GIỮ dấu tiếng Việt + chính tả cổ nguyên văn (vd nhân-loại, chánh). Mảng
+Quy tắc: GIỮ dấu tiếng Việt + chính tả ĐÚNG NHƯ BẢN GỐC (nếu cổ thì giữ từ cổ vd
+nhân-loại, chánh; nếu hiện đại thì giữ chính tả hiện hành — KHÔNG tự sửa). terminology
+chỉ điền khi sách THẬT SỰ có từ cổ/chuyên ngành đặc thù, else mảng rỗng. Mảng
 rỗng nếu không xác định. proper_names ưu tiên tên riêng lặp lại (người/địa danh).
 pages_per_image: theo hướng dẫn XÁC ĐỊNH SỐ TRANG MỖI ẢNH ở trên (số nguyên, 1 hoặc 2).
 table_of_contents: chỉ điền nếu thấy MỤC LỤC trong các trang mẫu, else mảng rỗng."""

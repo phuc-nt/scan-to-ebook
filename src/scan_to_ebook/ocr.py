@@ -49,12 +49,12 @@ NHIỆM VỤ: Trích xuất TOÀN BỘ văn bản tiếng Việt trong ảnh nà
 
 QUY TẮC BẮT BUỘC:
 1. Giữ NGUYÊN dấu tiếng Việt (ả, ấ, ầ, ẩ, ẫ, ậ, đ, ...). KHÔNG bỏ dấu, KHÔNG đoán sai dấu.
-2. Giữ chính tả/từ vựng cổ NGUYÊN VĂN nếu có (vd: "nhân-loại", "văn-chương", "chánh" thay vì sửa thành "chính"). Đây là văn bản cổ.
-3. Layout 2 cột: đọc cột TRÁI trước, cột PHẢI sau. Nối liền văn bản, KHÔNG giữ cấu trúc cột.
+2. Trung thành VỚI BẢN GỐC: chép đúng chính tả hiện trên trang, KHÔNG hiện-đại-hoá, KHÔNG sửa "lỗi". NẾU là văn bản cổ, giữ nguyên chính tả/từ cổ (vd "nhân-loại", "văn-chương", "chánh"); NẾU hiện đại, giữ đúng chính tả hiện hành. Tên riêng/từ nước ngoài giữ y như in.
+3. Layout nhiều cột: đọc cột TRÁI trước, cột PHẢI sau (theo thứ tự đọc). Nối liền văn bản, KHÔNG giữ cấu trúc cột.
 4. Heading/title: dùng `## ` hoặc `### `.
 5. Bullet/numbered list: dùng `- ` hoặc `1. `.
 6. Footnote (số nhỏ trên cao): viết `[^N]` inline, footnote body cuối page dạng `[^N]: nội dung`.
-7. Bỏ qua header trang (vd "NAM PHONG") và số trang.
+7. Bỏ qua header/footer trang chạy (tên sách/chương lặp ở mép trang) và số trang.
 8. Hyphen cuối dòng (vd "văn-\\nchương"): nối lại thành "văn-chương".
 9. Đoạn văn cách bằng dòng trống.
 

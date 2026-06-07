@@ -10,7 +10,8 @@ git clone <repo> ~/workspace/scan-to-ebook && cd ~/workspace/scan-to-ebook
 python3 -m venv .venv && .venv/bin/pip install -e .
 cp .env.example .env && $EDITOR .env   # paste OPENROUTER_API_KEY=...
 
-source .env
+# .env tự nạp (không cần source). Tạo inbox rồi chạy:
+.venv/bin/scan2ebook init <your-book-slug> --from ~/path/to/scanned-images
 .venv/bin/scan2ebook all ~/Books-inbox/<your-book-slug>
 ```
 

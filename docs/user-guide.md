@@ -38,6 +38,8 @@ cp .env.example .env
 # Mở .env bằng editor, paste key vào sau OPENROUTER_API_KEY=
 ```
 
+Pipeline **tự nạp `.env`** (tìm ở thư mục hiện tại rồi repo root) nên không cần `source .env` mỗi shell. Nếu đã `export OPENROUTER_API_KEY` sẵn thì biến đó được ưu tiên (không bị `.env` ghi đè). Parser `.env` đơn giản: chỉ `KEY=value` mỗi dòng (bỏ comment đầu dòng, strip nháy bao ngoài). KHÔNG hỗ trợ prefix `export ` hay comment inline (`KEY=val # ...`) — viết thuần `KEY=value`.
+
 Nếu chưa có credit OpenRouter, nạp $5–10 để start. Cost dao động $0.05/page A4 với Gemini 3.1 Pro Preview, một quyển 200 trang khoảng $10.
 
 ## Cấu hình Drive (tùy chọn)
@@ -75,7 +77,9 @@ rclone lsd gdrive:
 
 Sách giấy cần được scan thành PNG hoặc JPG, mỗi trang một file. App Phúc đang dùng là vFlat trên iPhone — auto crop, auto deskew, output PNG. Adobe Scan và ScannerPro cũng tốt. Tránh chụp thường bằng camera vì lệch perspective.
 
-Đặt file theo thứ tự `page_001.png`, `page_002.png`, ... Số 3 chữ số để sort filename đúng thứ tự (tránh page_10 đứng trước page_2). Nếu app scan đặt tên khác (vFlat sinh `IMG_001.png`), rename thủ công hoặc dùng:
+Cách nhanh nhất: dùng lệnh `init` để tạo inbox + import ảnh + rename tự động (xem mục "Tạo inbox nhanh" bên dưới). Pipeline dùng **natural-sort** nên tên file không bắt buộc zero-pad — `page_5.png`..`page_80.png` vẫn sort đúng số học. Tuy vậy đặt `page_001.png`, `page_002.png`... vẫn gọn và dễ đọc hơn.
+
+Nếu muốn rename thủ công (app scan đặt tên khác như vFlat `IMG_001.png`):
 
 ```bash
 cd ~/Books-inbox/<slug>/
@@ -83,6 +87,8 @@ ls *.png | nl | while read n f; do
   mv "$f" "$(printf 'page_%03d.png' $n)"
 done
 ```
+
+Pipeline nhận cả **PNG lẫn JPG/JPEG** — không cần convert.
 
 DPI tối thiểu khuyến nghị là 300 DPI cho text rõ ràng. Vision model tolerate được DPI thấp hơn nhưng dấu Việt có thể đoán sai.
 
@@ -111,13 +117,25 @@ Thư mục inbox hoàn chỉnh trông như sau.
 
 `cover.jpg` optional. Nếu có, pandoc tự embed thành bìa epub. Ảnh đẹp nhất là 1600x2400 portrait, nhưng pandoc accept mọi kích thước.
 
+## Tạo inbox nhanh
+
+Lệnh `init` gộp các bước chuẩn bị (tạo folder, copy ảnh, rename `page_NNN`, sinh `metadata.json` mẫu) thành một lệnh.
+
+```bash
+scan2ebook init namphong-q01 --from ~/Desktop/scan-output \
+  --title "Nam Phong Tạp Chí Q01 (1917)" --author "Phạm Quỳnh"
+```
+
+Kết quả: tạo `~/Books-inbox/namphong-q01/`, copy + natural-sort + rename ảnh từ `--from` thành `page_001.<ext>`..., và ghi `metadata.json` từ các cờ `--title/--author/--lang/--year`. Đổi thư mục gốc bằng `--base`.
+
+Bỏ `--from` nếu muốn tự copy ảnh sau (lệnh chỉ tạo folder + metadata mẫu). `metadata.json` đã tồn tại sẽ được giữ nguyên, không ghi đè. Nếu inbox đã có file `page_*`, `init --from` sẽ báo lỗi (rc=2) thay vì import — xoá page cũ trước rồi chạy lại, tránh để lại page rác bị OCR nhầm (tốn tiền).
+
 ## Smoke test sách mới
 
 Khi scan sách mới chưa từng test, đừng chạy thẳng full pipeline. Cost rủi ro $10+ nếu OCR ra rác. Test 10 trang đầu trước.
 
 ```bash
-source .env
-scan2ebook ocr ~/Books-inbox/namphong-q01 ~/Books-inbox/../output/namphong-q01/ocr --limit 10
+scan2ebook ocr ~/Books-inbox/namphong-q01 ~/output/namphong-q01/ocr --limit 10
 ```
 
 Tốn khoảng $0.50. Mở vài file `.md` bằng editor để check chất lượng. Cần check.
@@ -137,7 +155,6 @@ Nếu OCR 10 trang ra OK, tiếp tục full book. Resumable nên 10 trang đã c
 Khi đã verify smoke test, chạy `all` để gộp 3 stage (OCR + post + epub).
 
 ```bash
-source .env
 scan2ebook all ~/Books-inbox/namphong-q01
 ```
 
@@ -233,16 +250,19 @@ Bóng đèn rõ trên page: chụp ngoài trời hoặc dưới đèn LED bàn, 
 
 Mực mờ (sách cũ): tăng exposure +1 stop khi scan. Vision model tolerate mờ tốt hơn pattern OCR (Tesseract).
 
-Trang trống (bìa, divider): để nguyên trong inbox, pipeline sẽ báo `empty content` và bạn manually placeholder (xem operations.md).
+Trang trống (bìa, divider): để nguyên trong inbox. Pipeline tự nhận diện trang trống thật (response rỗng + `finish_reason=stop`) và ghi placeholder `<!-- blank page -->`, **không cần can thiệp tay**, không tính là fail.
 
 ## Lệnh tham khảo
 
 | Lệnh | Mục đích |
 |---|---|
+| `scan2ebook init <slug> --from <dir>` | Tạo inbox + import ảnh + metadata mẫu |
 | `scan2ebook ocr <inbox> <out>` | Stage 1: OCR per page |
+| `scan2ebook ocr <inbox> <out> --dry-run` | Đếm trang + ước lượng chi phí, không gọi API |
 | `scan2ebook ocr <inbox> <out> --limit 10` | Smoke test 10 trang đầu |
 | `scan2ebook ocr <inbox> <out> --workers 8` | Parallel cao hơn (cẩn thận rate limit) |
-| `scan2ebook ocr <inbox> <out> --model <id>` | Đổi vision model (vd: `anthropic/claude-opus-4`) |
+| `scan2ebook ocr <inbox> <out> --max-tokens 16000` | Tăng trần output cho trang text rất dày |
+| `scan2ebook ocr <inbox> <out> --model <id>` | Đổi vision model (hoặc đặt env `OCR_MODEL`) |
 | `scan2ebook post <ocr-dir> <book.md> --title "..."` | Stage 2: merge → book.md |
 | `scan2ebook epub <book.md> <book.epub>` | Stage 3: build epub |
 | `scan2ebook epub <book.md> <book.epub> --cover cover.jpg` | Embed cover |

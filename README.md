@@ -10,9 +10,13 @@ git clone <repo> ~/workspace/scan-to-ebook && cd ~/workspace/scan-to-ebook
 python3 -m venv .venv && .venv/bin/pip install -e .
 cp .env.example .env && $EDITOR .env   # paste OPENROUTER_API_KEY=...
 
+# Verify setup: python/pandoc/key ready?
+.venv/bin/scan2ebook doctor
+
 # .env tự nạp (không cần source). Tạo inbox rồi chạy:
 .venv/bin/scan2ebook init <your-book-slug> --from ~/path/to/scanned-images
-.venv/bin/scan2ebook all ~/Books-inbox/<your-book-slug>
+.venv/bin/scan2ebook all ~/Books-inbox/<your-book-slug> --smoke  # test 10 trang + estimate cost
+# Review smoke epub, confirm at prompt, full run tự tiếp tục
 ```
 
 ## Tài liệu

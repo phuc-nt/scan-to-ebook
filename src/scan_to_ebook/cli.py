@@ -1,17 +1,23 @@
 """CLI entry point: `scan2ebook <subcommand>`.
 
 Subcommands:
-    ocr <inbox-dir> <output-dir>            # Stage 1
-    post <ocr-dir> <book.md> --title ...    # Stage 2
-    epub <book.md> <book.epub>              # Stage 3
+    init <slug> --from <dir>                # register a book, copy scans in
+    all <slug>                              # Stage 1+2+3 (4 optional via --upload)
+    ocr <input-dir> <output-dir>           # Stage 1 only
+    post <ocr-dir> <book.md> --title ...    # Stage 2 only
+    epub <book.md> <book.epub>             # Stage 3 only
     upload <book.epub>                      # Stage 4 (rclone gdrive)
-    all <inbox-dir>                         # 1+2+3 (4 optional)
 
-Inbox convention:
-    inbox/<slug>/
-        page_001.png, page_002.png, ...
-        metadata.json   # optional: {title, author, lang, year}
-        cover.jpg       # optional
+Storage layout (created by `init`, lives under the data-root):
+    <home>/<slug>/                          # home = $SCAN2EBOOK_HOME or ~/scan2ebook
+        scans/                              # source images (never auto-deleted)
+            page_001.png, page_002.png, ...
+            metadata.json                   # optional: {title, author, lang, year}
+            cover.jpg                       # optional
+        work/                               # cache: context, OCR text, book.md
+        dist/<slug>.epub                    # final output
+
+`all` takes a SLUG (joined to the data-root) or a PATH to a book-home.
 """
 
 from __future__ import annotations
@@ -334,7 +340,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ocr
     p_ocr = sub.add_parser("ocr", help="Stage 1: page images → per-page markdown")
-    p_ocr.add_argument("input", type=Path, help="inbox dir chứa PNG/JPG")
+    p_ocr.add_argument("input", type=Path, help="dir chứa page images (PNG/JPG/HEIC/HEIF)")
     p_ocr.add_argument("output", type=Path, help="output dir cho .md")
     p_ocr.add_argument("--model", default=os.environ.get("OCR_MODEL", ocr.DEFAULT_MODEL))
     p_ocr.add_argument("--workers", type=int, default=4)
@@ -373,8 +379,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # all
     p_all = sub.add_parser("all", help="Stage 1+2+3 chain (4 optional via --upload)")
-    p_all.add_argument("inbox", type=Path, help="slug (vd namphong-q01) HOẶC path tới book-home chứa scans/")
-    p_all.add_argument("--home", type=Path, default=None, help="data-root khi `inbox` là slug (default $SCAN2EBOOK_HOME hoặc ~/scan2ebook)")
+    p_all.add_argument("inbox", type=Path, metavar="book", help="slug (vd namphong-q01) HOẶC path tới book-home chứa scans/")
+    p_all.add_argument("--home", type=Path, default=None, help="data-root khi `book` là slug (default $SCAN2EBOOK_HOME hoặc ~/scan2ebook)")
     p_all.add_argument("--output", type=Path, default=None, help="(deprecated) override book-home (X/scans,work,dist)")
     p_all.add_argument("--model", default=os.environ.get("OCR_MODEL", ocr.DEFAULT_MODEL))
     p_all.add_argument("--workers", type=int, default=4)

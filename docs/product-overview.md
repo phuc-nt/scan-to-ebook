@@ -22,7 +22,7 @@ Chi phí thực tế khoảng $0.05/trang A4 cho Gemini 3.1 Pro, tức $10 cho s
 
 Pipeline làm 4 việc theo thứ tự cố định.
 
-Đầu vào là một thư mục chứa ảnh PNG hoặc JPG, mỗi ảnh là một trang sách đã được người dùng tự chụp bằng app scan trên smartphone (vFlat, Adobe Scan, ScannerPro) hoặc scanner phẳng. Thư mục có thể có thêm `metadata.json` và `cover.jpg` optional.
+Đầu vào là một thư mục chứa ảnh PNG, JPG, HEIC hoặc HEIF, mỗi ảnh là một trang sách đã được người dùng tự chụp bằng app scan trên smartphone (vFlat, Adobe Scan, ScannerPro) hoặc scanner phẳng. HEIC/HEIF (định dạng mặc định iPhone) tự động convert→JPG tại stage import (`init --from`), do đó OCR stage chỉ nhận JPG/PNG. Thư mục có thể có thêm `metadata.json` và `cover.jpg` optional.
 
 Đầu ra là một file `.epub` cùng các file `.md` trung gian (per-page và book-level) để người dùng có thể chỉnh sửa thủ công nếu cần trước khi build epub lại.
 

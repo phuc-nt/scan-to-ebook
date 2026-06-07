@@ -1,6 +1,6 @@
 # scan-to-ebook
 
-Pipeline biến sách giấy đã scan (PNG/JPG) thành epub đọc trên Books.app, Kindle. OCR qua OpenRouter vision model, post-process bằng Python stdlib, build epub bằng pandoc, upload Drive bằng rclone. Verified zero error trên corpus tiếng Việt cổ (Nam Phong 1917, 75 trang).
+Pipeline biến sách giấy đã scan (PNG/JPG/HEIC/HEIF) thành epub đọc trên Books.app, Kindle. OCR qua OpenRouter vision model, post-process bằng Python stdlib, build epub bằng pandoc, upload Drive bằng rclone. HEIC/HEIF (iPhone default) tự convert→JPG tại import stage. Verified zero error trên corpus tiếng Việt cổ (Nam Phong 1917, 75 trang) + 152-image iPhone book (119 HEIC + 33 JPG).
 
 ## Quickstart
 

@@ -96,15 +96,26 @@ def _detect_mime(path: Path) -> str:
     return "image/png"
 
 
-def _post_once(api_key: str, model: str, image_b64: str, mime: str, max_tokens: int) -> tuple[str, dict]:
-    """1 lần POST, không retry. Raises trên HTTP/parse error với body context."""
+def _post_once(
+    api_key: str,
+    model: str,
+    image_b64: str,
+    mime: str,
+    max_tokens: int,
+    prompt_context: str = "",
+) -> tuple[str, dict]:
+    """1 lần POST, không retry. Raises trên HTTP/parse error với body context.
+
+    `prompt_context` (block bối cảnh sách từ context pre-pass) được append vào base
+    PROMPT khi non-empty. Base PROMPT giữ nguyên byte-for-byte."""
+    text = PROMPT + ("\n\n" + prompt_context if prompt_context else "")
     payload = {
         "model": model,
         "messages": [
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": PROMPT},
+                    {"type": "text", "text": text},
                     {
                         "type": "image_url",
                         "image_url": {"url": f"data:{mime};base64,{image_b64}"},
@@ -184,18 +195,20 @@ def ocr_page(
     image_path: Path,
     retries: int = 2,
     max_tokens: int = 12000,
+    prompt_context: str = "",
 ) -> tuple[str, dict]:
     """Single page OCR với retry exponential backoff cho transient error.
 
     Retry trên 429/5xx/timeout/empty content/malformed JSON. Không retry trên
     4xx khác, cũng không retry blank page (empty+finish_reason=stop) — trang
-    trống thật, run_batch sẽ ghi placeholder."""
+    trống thật, run_batch sẽ ghi placeholder. `prompt_context` từ context pre-pass
+    được thread xuống _post_once."""
     image_b64 = _encode_image(image_path)
     mime = _detect_mime(image_path)
     last_exc: Exception | None = None
     for attempt in range(retries + 1):
         try:
-            return _post_once(api_key, model, image_b64, mime, max_tokens)
+            return _post_once(api_key, model, image_b64, mime, max_tokens, prompt_context)
         except RuntimeError as exc:
             last_exc = exc
             if not _is_transient(str(exc)) or attempt == retries:
@@ -248,11 +261,13 @@ def run_batch(
     limit: int | None = None,
     max_tokens: int = 12000,
     on_event=None,
+    prompt_context: str = "",
 ) -> dict:
     """Run OCR batch. Returns summary dict.
 
     `on_event(kind, payload)` — optional callback cho progress logging
-    (kind: 'start', 'page_ok', 'page_fail', 'done')."""
+    (kind: 'start', 'page_ok', 'page_fail', 'done').
+    `prompt_context` — block bối cảnh sách (context pre-pass) append vào PROMPT mỗi trang."""
     input_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -271,7 +286,9 @@ def run_batch(
 
     def work(page_path: Path) -> PageResult:
         try:
-            md, meta = ocr_page(api_key, model, page_path, max_tokens=max_tokens)
+            md, meta = ocr_page(
+                api_key, model, page_path, max_tokens=max_tokens, prompt_context=prompt_context
+            )
             usage = meta.get("usage", {})
             return PageResult(
                 page_path=page_path,

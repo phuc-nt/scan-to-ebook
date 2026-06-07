@@ -41,7 +41,7 @@ def patched(monkeypatch):
     calls = {"run_batch": [], "build_book": 0}
 
     def fake_run_batch(*, api_key, input_dir, output_dir, model, workers,
-                       pattern, limit=None, max_tokens, on_event=None):
+                       pattern, limit=None, max_tokens, on_event=None, prompt_context=""):
         calls["run_batch"].append({"limit": limit})
         # giả lập đã OCR `limit` (hoặc tất cả) trang vào output_dir để
         # collect_pending_pages đếm remaining đúng.
@@ -69,6 +69,11 @@ def patched(monkeypatch):
     # pipeline → patch ở pipeline mới chặn đúng live call path.
     monkeypatch.setattr(pipeline, "_build_book", fake_build_book)
     monkeypatch.setattr(ocr, "require_api_key", lambda: "sk-test")
+    # Context pre-pass chạy TRƯỚC run_batch (gọi API thật) → stub trả block rỗng +
+    # cost 0 để test gate flow độc lập (prepass có suite riêng test_context_prepass).
+    monkeypatch.setattr(
+        pipeline, "_run_prepass_or_abort", lambda **kw: ("", 0.0)
+    )
     return calls
 
 
@@ -158,7 +163,7 @@ def test_smoke_est_uses_measured_per_page_cost(tmp_path, monkeypatch, capsys):
     inbox = _make_inbox(tmp_path, 20)
 
     def fake_run_batch(*, api_key, input_dir, output_dir, model, workers,
-                       pattern, limit=None, max_tokens, on_event=None):
+                       pattern, limit=None, max_tokens, on_event=None, prompt_context=""):
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         pages = sorted(Path(input_dir).glob("page_*.png"))
         n = limit if limit is not None else len(pages)
@@ -176,12 +181,44 @@ def test_smoke_est_uses_measured_per_page_cost(tmp_path, monkeypatch, capsys):
         "epub_result": {"size_bytes": 2048, "magic_ok": True, "output": "x", "pandoc_warnings": []},
         "book_md": tmp_path / "out" / "book.smoke.md", "book_epub": tmp_path / "out" / "book.smoke.epub"})
     monkeypatch.setattr(ocr, "require_api_key", lambda: "sk-test")
+    monkeypatch.setattr(pipeline, "_run_prepass_or_abort", lambda **kw: ("", 0.0))
 
     rc = cli.cmd_all(_smoke_args(inbox, tmp_path / "out", json=True))
     assert rc == 0
     obj = _json.loads(capsys.readouterr().out.strip())
     # $2.00 / 10 ok = $0.20/trang × 10 còn lại = $2.00 (KHÔNG phải flat $0.50).
     assert obj["est_full_cost_usd"] == pytest.approx(2.0)
+
+
+def test_smoke_yes_carries_prepass_cost_into_full_summary(
+    patched, tmp_path, monkeypatch, capsys
+):
+    """M2: prepass cost tiêu ở smoke PHẢI xuất hiện trong summary full (--yes).
+
+    Full prepass = cache hit (cost 0) → nếu không carry, prepass_cost_usd=0 ⇒
+    agent under-count spend. Stub prepass trả cost $0.09 ở smoke, full = cache (0).
+    """
+    import json as _json
+
+    inbox = _make_inbox(tmp_path, 20)
+
+    # smoke prepass tốn $0.09; full prepass (lần 2) = cache hit cost 0.
+    prepass_calls = {"n": 0}
+
+    def fake_prepass(**kw):
+        prepass_calls["n"] += 1
+        return ("", 0.09) if prepass_calls["n"] == 1 else ("", 0.0)
+
+    monkeypatch.setattr(pipeline, "_run_prepass_or_abort", fake_prepass)
+    rc = cli.cmd_all(_smoke_args(inbox, tmp_path / "out", yes=True, json=True))
+    assert rc == 0
+    assert [c["limit"] for c in patched["run_batch"]] == [10, None]  # smoke → full
+    obj = _json.loads(capsys.readouterr().out.strip())
+    assert obj["status"] == "ok"
+    # prepass_cost_usd cuối = carried (0.09 từ smoke) + full prepass (0) = 0.09.
+    assert obj["prepass_cost_usd"] == pytest.approx(0.09)
+    # cost tổng = OCR full (20×0.05=1.0) + prepass carried 0.09 = 1.09.
+    assert obj["cost_usd"] == pytest.approx(1.09)
 
 
 def test_smoke_fewer_than_10_pages(patched, tmp_path, monkeypatch, capsys):

@@ -51,12 +51,15 @@ class SummaryCollector:
     def __init__(self) -> None:
         self.done_payload: dict = {}
         self.start_payload: dict = {}
+        self.context_payload: dict = {}
 
     def __call__(self, kind: str, payload: dict) -> None:
         if kind == "start":
             self.start_payload = dict(payload)
         elif kind == "done":
             self.done_payload = dict(payload)
+        elif kind in ("context_ok", "context_fail"):
+            self.context_payload = dict(payload)
         # các event page_* không cần buffer ở json mode (chi tiết per-page bỏ
         # qua; muốn chi tiết thì dùng --json-lines).
 
@@ -138,6 +141,16 @@ def human_stream(kind: str, payload: dict) -> None:
         print(f"  - {payload['page']}: blank → placeholder {payload['dst']}", file=sys.stderr)
     elif kind == "page_fail":
         print(f"  - {payload['page']}: FAIL {payload['error']}", file=sys.stderr)
+    elif kind == "context_ok":
+        cached = " (cached)" if payload.get("from_cache") else ""
+        print(
+            f"Context: {payload.get('title')} | {payload.get('pages_per_image')}p/ảnh | "
+            f"{payload.get('toc_entries')} mục lục | {payload.get('proper_names')} tên riêng "
+            f"| ~${payload.get('cost_usd')}{cached}",
+            file=sys.stderr,
+        )
+    elif kind == "context_fail":
+        print(f"Context pre-pass FAIL: {payload.get('error')}", file=sys.stderr)
     elif kind == "done":
         print(
             f"\nDone. ok={payload['ok']} blank={payload['blank']} fail={payload['fail']} cost~${payload['cost_usd']}",

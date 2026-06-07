@@ -66,6 +66,15 @@ def _print_ocr_event(kind: str, payload: dict) -> None:
         print(f"  - {payload['page']}: blank → placeholder {payload['dst']}")
     elif kind == "page_fail":
         print(f"  - {payload['page']}: FAIL {payload['error']}", file=sys.stderr)
+    elif kind == "context_ok":
+        cached = " (cached)" if payload.get("from_cache") else ""
+        print(
+            f"Context: {payload.get('title')} | {payload.get('pages_per_image')}p/ảnh | "
+            f"{payload.get('toc_entries')} mục lục | {payload.get('proper_names')} tên riêng "
+            f"| ~${payload.get('cost_usd')}{cached}"
+        )
+    elif kind == "context_fail":
+        print(f"Context pre-pass FAIL: {payload.get('error')}", file=sys.stderr)
     elif kind == "done":
         print(f"\nDone. ok={payload['ok']} blank={payload['blank']} fail={payload['fail']} cost~${payload['cost_usd']}")
 
@@ -253,12 +262,19 @@ def cmd_all(args: argparse.Namespace) -> int:
         return 2
 
     # --smoke: OCR ≤10 trang → mini epub → ước cost full → gate xác nhận.
+    # run_smoke_gate trả int (gate dừng → return luôn) hoặc float (đã duyệt → chạy
+    # full, float = prepass cost đã tiêu ở smoke để fold vào tổng cost cuối).
+    carried_cost = 0.0
     if args.smoke:
         gated = pipeline.run_smoke_gate(args, inbox_dir, output_root, ocr_dir, meta, mode, human_out, api_key)
-        if gated is not None:
+        if isinstance(gated, int):
             return gated  # gate dừng (chưa duyệt) → trả luôn, KHÔNG chạy full.
+        carried_cost = gated  # float: prepass cost đã tiêu ở smoke (one-off).
 
-    return pipeline.run_full_pipeline(args, inbox_dir, output_root, ocr_dir, meta, mode, human_out, api_key)
+    return pipeline.run_full_pipeline(
+        args, inbox_dir, output_root, ocr_dir, meta, mode, human_out, api_key,
+        carried_cost=carried_cost,
+    )
 
 
 def _add_json_flags(parser: argparse.ArgumentParser) -> None:

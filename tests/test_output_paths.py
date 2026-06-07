@@ -1,46 +1,92 @@
-"""Tests cho F3 output path resolution (P4).
+"""Tests cho path resolution sau restructure (layout: <home>/<slug>/{scans,work,dist}).
 
 Yêu cầu:
-- _resolve_output_root ưu tiên: --output > $SCAN2EBOOK_OUTPUT_ROOT/<slug> >
-  mặc định <inbox-parent>/../output/<slug>.
-- abs path in ra đầu run (regression: env unset = hành vi cũ).
+- _resolve_data_root ưu tiên: --home > $SCAN2EBOOK_HOME > $SCAN2EBOOK_OUTPUT_ROOT
+  (deprecated, warn) > ~/scan2ebook.
+- _resolve_book_paths: slug → data-root/slug; path (có separator / tồn tại) → dùng thẳng.
+- _resolve_output_root (shim cũ) giờ trả zone work/ (cache root), KHÔNG còn phẳng.
 """
 
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 from scan_to_ebook import pipeline
 
 
-def _args(output=None) -> argparse.Namespace:
-    return argparse.Namespace(output=output)
+def _args(**over) -> argparse.Namespace:
+    base = dict(home=None, output=None)
+    base.update(over)
+    return argparse.Namespace(**base)
 
 
-def test_resolve_output_explicit_wins(tmp_path, monkeypatch):
-    monkeypatch.setenv("SCAN2EBOOK_OUTPUT_ROOT", str(tmp_path / "env"))
-    inbox = tmp_path / "inbox" / "mybook"
-    got = pipeline._resolve_output_root(_args(output=tmp_path / "explicit"), inbox, "mybook")
-    assert got == tmp_path / "explicit"  # --output thắng cả env
+# --------------------------------------------------------- _resolve_data_root
+
+def test_data_root_home_flag_wins(tmp_path, monkeypatch):
+    monkeypatch.setenv("SCAN2EBOOK_HOME", str(tmp_path / "env"))
+    got = pipeline._resolve_data_root(_args(home=tmp_path / "flag"))
+    assert got == tmp_path / "flag"  # --home thắng cả env
 
 
-def test_resolve_output_env_root(tmp_path, monkeypatch):
-    monkeypatch.setenv("SCAN2EBOOK_OUTPUT_ROOT", str(tmp_path / "env"))
-    inbox = tmp_path / "inbox" / "mybook"
-    got = pipeline._resolve_output_root(_args(output=None), inbox, "mybook")
-    assert got == tmp_path / "env" / "mybook"  # env_root/<slug>
-
-
-def test_resolve_output_default_when_env_unset(tmp_path, monkeypatch):
+def test_data_root_env_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("SCAN2EBOOK_HOME", str(tmp_path / "env"))
     monkeypatch.delenv("SCAN2EBOOK_OUTPUT_ROOT", raising=False)
-    inbox = tmp_path / "books" / "inbox" / "mybook"
-    got = pipeline._resolve_output_root(_args(output=None), inbox, "mybook")
-    # regression: hành vi cũ <inbox-parent>/../output/<slug>.
-    assert got == inbox.parent.parent / "output" / "mybook"
+    got = pipeline._resolve_data_root(_args())
+    assert got == tmp_path / "env"
 
 
-def test_resolve_output_is_absolute_after_resolve(tmp_path, monkeypatch):
+def test_data_root_legacy_env_alias_warns(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("SCAN2EBOOK_HOME", raising=False)
+    monkeypatch.setenv("SCAN2EBOOK_OUTPUT_ROOT", str(tmp_path / "legacy"))
+    got = pipeline._resolve_data_root(_args())
+    assert got == tmp_path / "legacy"
+    assert "deprecated" in capsys.readouterr().err.lower()
+
+
+def test_data_root_default_is_home_scan2ebook(monkeypatch):
+    monkeypatch.delenv("SCAN2EBOOK_HOME", raising=False)
     monkeypatch.delenv("SCAN2EBOOK_OUTPUT_ROOT", raising=False)
-    inbox = tmp_path / "books" / "inbox" / "mybook"
-    got = pipeline._resolve_output_root(_args(output=None), inbox, "mybook")
+    got = pipeline._resolve_data_root(_args())
+    assert got == Path.home() / "scan2ebook"
+    assert got.is_absolute()
+
+
+# ------------------------------------------------------- _resolve_book_paths
+
+def test_book_paths_from_slug(tmp_path, monkeypatch):
+    monkeypatch.delenv("SCAN2EBOOK_OUTPUT_ROOT", raising=False)
+    bp = pipeline._resolve_book_paths(_args(home=tmp_path / "root"), Path("mybook"))
+    assert bp.book_home == tmp_path / "root" / "mybook"
+    assert bp.scans_dir == bp.book_home / "scans"
+    assert bp.work_dir == bp.book_home / "work"
+    assert bp.ocr_dir == bp.book_home / "work" / "ocr"
+    assert bp.dist_dir == bp.book_home / "dist"
+
+
+def test_book_paths_from_explicit_path(tmp_path):
+    # Có separator → coi là path tới book-home, KHÔNG ghép data-root.
+    home = tmp_path / "some" / "where" / "mybook"
+    bp = pipeline._resolve_book_paths(_args(), home)
+    assert bp.book_home == home
+    assert bp.scans_dir == home / "scans"
+
+
+def test_book_paths_output_override(tmp_path):
+    bp = pipeline._resolve_book_paths(_args(output=tmp_path / "X"), Path("ignored-slug"))
+    assert bp.book_home == tmp_path / "X"
+    assert bp.work_dir == tmp_path / "X" / "work"
+
+
+# --------------------------------------------- _resolve_output_root shim (work/)
+
+def test_resolve_output_root_shim_returns_work(tmp_path, monkeypatch):
+    monkeypatch.delenv("SCAN2EBOOK_OUTPUT_ROOT", raising=False)
+    got = pipeline._resolve_output_root(_args(home=tmp_path / "root"), tmp_path / "x", "mybook")
+    assert got == tmp_path / "root" / "mybook" / "work"
+
+
+def test_resolve_output_root_shim_output_flag(tmp_path):
+    got = pipeline._resolve_output_root(_args(output=tmp_path / "X"), tmp_path / "x", "mybook")
+    assert got == tmp_path / "X" / "work"
     assert got.resolve().is_absolute()

@@ -80,32 +80,36 @@ def _print_ocr_event(kind: str, payload: dict) -> None:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
-    """Tạo skeleton inbox: mkdir + (option) import ảnh + metadata.json mẫu."""
-    base = args.base.expanduser()
-    inbox = base / args.slug
-    inbox.mkdir(parents=True, exist_ok=True)
-    print(f"==> inbox: {inbox}")
+    """Tạo skeleton book theo layout mới: <data-root>/<slug>/{scans,work,dist}/.
+
+    Ảnh + metadata.json vào scans/ (zone nguồn). work/ + dist/ tạo lazy lúc `all`.
+    """
+    data_root = pipeline._resolve_data_root(args)
+    bp = pipeline._book_paths_from_home(data_root / args.slug)
+    bp.scans_dir.mkdir(parents=True, exist_ok=True)
+    print(f"==> book: {bp.book_home}")
+    print(f"==> scans: {bp.scans_dir}")
 
     if args.from_dir:
         src = args.from_dir.expanduser()
         if not src.is_dir():
             print(f"--from dir not found: {src}", file=sys.stderr)
             return 2
-        # Guard re-import: nếu inbox đã có page_* thì copy mới sẽ để lại file thừa
+        # Guard re-import: nếu scans/ đã có page_* thì copy mới sẽ để lại file thừa
         # (vd cũ 3 page, import 2 → page_003 mồ côi) → OCR nhầm page rác, tốn tiền.
         # Bắt user dọn trước thay vì âm thầm xoá/ghi đè.
-        existing = list(inbox.glob("page_*"))
+        existing = list(bp.scans_dir.glob("page_*"))
         if existing:
             print(
-                f"inbox đã có {len(existing)} file page_* — xoá chúng trước rồi "
-                f"chạy lại init --from (tránh page rác): {inbox}",
+                f"scans/ đã có {len(existing)} file page_* — xoá chúng trước rồi "
+                f"chạy lại init --from (tránh page rác): {bp.scans_dir}",
                 file=sys.stderr,
             )
             return 2
-        n = _import_images(src, inbox)
-        print(f"Imported {n} ảnh → page_NNN.<ext>")
+        n = _import_images(src, bp.scans_dir)
+        print(f"Imported {n} ảnh → scans/page_NNN.<ext>")
 
-    meta_file = inbox / "metadata.json"
+    meta_file = bp.scans_dir / "metadata.json"
     if meta_file.exists():
         print(f"metadata.json đã tồn tại, giữ nguyên: {meta_file}")
     else:
@@ -118,7 +122,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(f"Tạo metadata.json mẫu: {meta_file}")
 
-    print(f"\nTiếp theo: bỏ ảnh vào (nếu chưa) rồi chạy:\n  scan2ebook all {inbox}")
+    print(f"\nTiếp theo: bỏ ảnh vào scans/ (nếu chưa) rồi chạy:\n  scan2ebook all {args.slug}")
     return 0
 
 
@@ -228,33 +232,58 @@ def cmd_upload(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_scans_dir(bp: pipeline.BookPaths) -> Path:
+    """Chọn thư mục đọc ảnh: ưu tiên scans/ (layout mới); fallback book_home phẳng
+    (legacy: page_* nằm trực tiếp trong inbox cũ) nếu scans/ chưa có nhưng home có ảnh.
+
+    Shim 1 release cho user còn inbox cũ — KHÔNG ép migrate ngay."""
+    if bp.scans_dir.is_dir():
+        return bp.scans_dir
+    # Legacy flat: page_* trực tiếp trong book_home (inbox cũ trước restructure).
+    if bp.book_home.is_dir() and any(bp.book_home.glob("page_*")):
+        print(
+            f"WARN: layout cũ (ảnh nằm trực tiếp trong {bp.book_home}). Khuyến nghị "
+            f"chuyển ảnh vào {bp.scans_dir}/ (layout mới: scans/work/dist).",
+            file=sys.stderr,
+        )
+        return bp.book_home
+    return bp.scans_dir  # mặc định mới (caller báo not-found nếu vắng)
+
+
 def cmd_all(args: argparse.Namespace) -> int:
-    """Thin handler: resolve paths/mode, xử lý not-found + dry-run, rồi delegate
-    smoke/full sang `pipeline` (logic chạy + gate an toàn nằm ở đó)."""
-    inbox_dir: Path = args.inbox.expanduser()
+    """Thin handler: resolve zones/mode, xử lý not-found + dry-run, rồi delegate
+    smoke/full sang `pipeline` (logic chạy + gate an toàn nằm ở đó).
+
+    Positional `inbox` nhận SLUG (ghép vào data-root) HOẶC PATH tới book-home."""
     mode = json_output.mode_from_args(args)
     human_out = sys.stderr if mode != "human" else sys.stdout
 
-    if not inbox_dir.is_dir():
+    bp = pipeline._resolve_book_paths(args, args.inbox)
+    scans_dir = _resolve_scans_dir(bp)
+    # Đọc ảnh từ scans_dir thật (có thể là legacy flat) → thay vào bp cho downstream.
+    bp = bp._replace(scans_dir=scans_dir)
+
+    if not scans_dir.is_dir():
+        msg = f"book không tìm thấy ảnh: {scans_dir} (chạy `scan2ebook init <slug> --from <ảnh>` trước)"
         if mode in ("json", "json-lines"):
             json_output.print_summary(json_output.build_summary(
                 stage="all", status="error", pages={}, cost_usd=0.0, paths={},
-                extra={"error": f"inbox dir not found: {inbox_dir}"}))
+                extra={"error": msg}))
         else:
-            print(f"inbox dir not found: {inbox_dir}", file=sys.stderr)
+            print(msg, file=sys.stderr)
         return 2
 
-    slug = inbox_dir.name
-    output_root = pipeline._resolve_output_root(args, inbox_dir, slug)
-    ocr_dir = output_root / "ocr"
+    slug = bp.book_home.name
 
     if args.dry_run:
-        return pipeline._print_dry_run(inbox_dir, ocr_dir, IMAGE_PATTERNS, None, mode)
+        return pipeline._print_dry_run(scans_dir, bp.ocr_dir, IMAGE_PATTERNS, None, mode)
 
-    output_root.mkdir(parents=True, exist_ok=True)
-    print(f"==> output: {output_root.resolve()}", file=human_out)  # F3: abs path
+    bp.work_dir.mkdir(parents=True, exist_ok=True)
+    bp.dist_dir.mkdir(parents=True, exist_ok=True)
+    print(f"==> book: {bp.book_home.resolve()}", file=human_out)
+    print(f"==> output: {bp.dist_dir.resolve()}", file=human_out)  # F3: abs path
 
-    meta = pipeline._load_metadata(inbox_dir, slug)
+    meta = pipeline._load_metadata(scans_dir, slug)
     print(f"==> {slug} | title={meta['title']!r}", file=human_out)
 
     api_key = pipeline._require_api_key_or_json(mode, stage="all")
@@ -266,14 +295,13 @@ def cmd_all(args: argparse.Namespace) -> int:
     # full, float = prepass cost đã tiêu ở smoke để fold vào tổng cost cuối).
     carried_cost = 0.0
     if args.smoke:
-        gated = pipeline.run_smoke_gate(args, inbox_dir, output_root, ocr_dir, meta, mode, human_out, api_key)
+        gated = pipeline.run_smoke_gate(args, bp, meta, mode, human_out, api_key)
         if isinstance(gated, int):
             return gated  # gate dừng (chưa duyệt) → trả luôn, KHÔNG chạy full.
         carried_cost = gated  # float: prepass cost đã tiêu ở smoke (one-off).
 
     return pipeline.run_full_pipeline(
-        args, inbox_dir, output_root, ocr_dir, meta, mode, human_out, api_key,
-        carried_cost=carried_cost,
+        args, bp, meta, mode, human_out, api_key, carried_cost=carried_cost,
     )
 
 
@@ -289,10 +317,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # init
-    p_init = sub.add_parser("init", help="Tạo skeleton inbox (folder + import ảnh + metadata mẫu)")
+    p_init = sub.add_parser("init", help="Tạo skeleton book (<home>/<slug>/{scans,work,dist} + import ảnh + metadata mẫu)")
     p_init.add_argument("slug", help="tên sách (folder name), vd namphong-q01")
-    p_init.add_argument("--base", type=Path, default=Path("~/Books-inbox"), help="thư mục gốc chứa inbox (default ~/Books-inbox)")
-    p_init.add_argument("--from", dest="from_dir", type=Path, default=None, help="copy ảnh từ thư mục này + rename page_NNN")
+    p_init.add_argument("--home", type=Path, default=None, help="data-root chứa mọi sách (default $SCAN2EBOOK_HOME hoặc ~/scan2ebook)")
+    p_init.add_argument("--from", dest="from_dir", type=Path, default=None, help="copy ảnh từ thư mục này → scans/page_NNN")
     p_init.add_argument("--title", default=None, help="title cho metadata.json (default = slug)")
     p_init.add_argument("--author", default=None)
     p_init.add_argument("--lang", default="vi")
@@ -345,8 +373,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # all
     p_all = sub.add_parser("all", help="Stage 1+2+3 chain (4 optional via --upload)")
-    p_all.add_argument("inbox", type=Path, help="inbox/<slug>/ dir chứa PNG + metadata.json")
-    p_all.add_argument("--output", type=Path, default=None, help="output root (default: $SCAN2EBOOK_OUTPUT_ROOT/<slug> nếu set, else <inbox-parent>/../output/<slug>)")
+    p_all.add_argument("inbox", type=Path, help="slug (vd namphong-q01) HOẶC path tới book-home chứa scans/")
+    p_all.add_argument("--home", type=Path, default=None, help="data-root khi `inbox` là slug (default $SCAN2EBOOK_HOME hoặc ~/scan2ebook)")
+    p_all.add_argument("--output", type=Path, default=None, help="(deprecated) override book-home (X/scans,work,dist)")
     p_all.add_argument("--model", default=os.environ.get("OCR_MODEL", ocr.DEFAULT_MODEL))
     p_all.add_argument("--workers", type=int, default=4)
     p_all.add_argument("--max-tokens", type=int, default=12000, help="max output tokens / page")

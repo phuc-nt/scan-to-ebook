@@ -16,12 +16,12 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import unicodedata
 from pathlib import Path
+from typing import NamedTuple
 
-from . import context_prepass, drive_upload, epub_build, json_output, ocr, post_process
+from . import context_prepass, drive_upload, epub_build, image_ops, json_output, ocr, post_process
 
 # Giá ước lượng Gemini 3.1 Pro Preview ~$0.05/page (đo ở Phase 0, 1 ảnh A4).
 EST_COST_PER_PAGE = 0.05
@@ -35,7 +35,8 @@ IMAGE_PATTERNS = "*.png,*.jpg,*.jpeg,*.PNG,*.JPG,*.JPEG"
 IMPORT_PATTERNS = IMAGE_PATTERNS + ",*.heic,*.heif,*.HEIC,*.HEIF"
 
 # Đuôi cần convert sang JPG trước khi OCR (vision API + pandoc không đọc HEIC/HEIF).
-_HEIC_SUFFIXES = {".heic", ".heif"}
+# Nguồn sự thật ở image_ops; alias giữ cho code/test cũ tham chiếu.
+_HEIC_SUFFIXES = image_ops.HEIC_SUFFIXES
 
 
 def _slugify(text: str) -> str:
@@ -150,32 +151,14 @@ def _print_dry_run(
 
 
 def _convert_heic(src: Path, dst: Path) -> None:
-    """Convert HEIC/HEIF → JPG bằng macOS `sips`. dst phải có đuôi .jpg.
+    """Convert HEIC/HEIF → JPG cross-platform. dst phải có đuôi .jpg.
 
     iPhone mặc định chụp HEIC — định dạng vision API + pandoc KHÔNG đọc được.
-    Convert lúc import (1 lần, không lặp mỗi OCR retry). Giữ EXIF/orientation.
-
-    sips là macOS-only: guard bằng shutil.which. Nếu thiếu (Linux/CI) → raise
-    lỗi rõ tên file + cách xử lý thủ công. KHÔNG silent-skip (mất trang = sách hỏng).
+    Convert lúc import (1 lần, không lặp mỗi OCR retry). Delegate sang image_ops:
+    dò backend (sips/magick/heif-convert/pillow-heif) → chạy cái đầu khả dụng.
+    Thiếu hết → raise với hướng dẫn cài theo OS (KHÔNG silent-skip: mất trang = sách hỏng).
     """
-    if shutil.which("sips") is None:
-        raise RuntimeError(
-            f"cần `sips` để convert HEIC nhưng không tìm thấy (macOS-only): {src.name}. "
-            "Trên Linux/CI hãy convert HEIC→JPG thủ công trước "
-            "(vd: `heif-convert`/`magick`) rồi import lại."
-        )
-    result = subprocess.run(
-        ["sips", "-s", "format", "jpeg", str(src), "--out", str(dst)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0 or not dst.exists():
-        # Dọn file out dở dang (sips ghi 1 phần rồi fail) → tránh để lại JPG hỏng.
-        dst.unlink(missing_ok=True)
-        raise RuntimeError(
-            f"sips convert HEIC thất bại (rc={result.returncode}) cho {src.name}: "
-            f"{result.stderr.strip()}"
-        )
+    image_ops.convert_heic(src, dst)
 
 
 def _import_images(src: Path, dst: Path) -> int:
@@ -203,28 +186,113 @@ def _import_images(src: Path, dst: Path) -> int:
     return len(imgs)
 
 
+# Tên thư mục gốc chứa toàn bộ sách (1 sách = 1 thư mục con). Visible trong Finder/
+# Explorer = "thuận tiện"; user document data nên KHÔNG ẩn (~/.local/share).
+DATA_ROOT_DIRNAME = "scan2ebook"
+
+# Ba zone trong mỗi book-home (tách quyền sở hữu/vòng đời — xem architecture doc).
+ZONE_SCANS = "scans"  # nguồn (user-owned, pipeline KHÔNG xoá)
+ZONE_WORK = "work"    # cache/trung gian (xoá an toàn = clean-room)
+ZONE_DIST = "dist"    # deliverable (epub cuối)
+
+
+class BookPaths(NamedTuple):
+    """Các đường dẫn zone của một sách. Nguồn DRY cho cmd_all/smoke/full."""
+
+    book_home: Path
+    scans_dir: Path
+    work_dir: Path
+    ocr_dir: Path
+    dist_dir: Path
+
+
+def _resolve_data_root(args: argparse.Namespace) -> Path:
+    """Quyết định data-root (gốc chứa mọi sách). Ưu tiên:
+    1. --home flag       → thắng
+    2. $SCAN2EBOOK_HOME  → kế
+    3. $SCAN2EBOOK_OUTPUT_ROOT (deprecated alias, warn stderr)
+    4. ~/scan2ebook      → mặc định
+    Tất cả .expanduser() (Path.home() tự đúng trên Windows)."""
+    home = getattr(args, "home", None)
+    if home:
+        return Path(home).expanduser()
+    env_home = os.environ.get("SCAN2EBOOK_HOME")
+    if env_home:
+        return Path(env_home).expanduser()
+    legacy = os.environ.get("SCAN2EBOOK_OUTPUT_ROOT")
+    if legacy:
+        print(
+            "WARN: SCAN2EBOOK_OUTPUT_ROOT deprecated — dùng SCAN2EBOOK_HOME "
+            "(layout mới: <home>/<slug>/{scans,work,dist}/).",
+            file=sys.stderr,
+        )
+        return Path(legacy).expanduser()
+    return Path.home() / DATA_ROOT_DIRNAME
+
+
+def _book_paths_from_home(book_home: Path) -> BookPaths:
+    """Dẫn xuất 3 zone từ một book-home đã biết."""
+    book_home = book_home.expanduser()
+    work = book_home / ZONE_WORK
+    return BookPaths(
+        book_home=book_home,
+        scans_dir=book_home / ZONE_SCANS,
+        work_dir=work,
+        ocr_dir=work / "ocr",
+        dist_dir=book_home / ZONE_DIST,
+    )
+
+
+def _resolve_book_paths(args: argparse.Namespace, arg: Path) -> BookPaths:
+    """Resolve book-home + zones từ positional `arg` của `all` (slug HOẶC path).
+
+    Rule (R2): `arg` là PATH nếu có separator HOẶC là thư mục tồn tại; else là SLUG
+    (ghép vào data-root). `--output X` (deprecated semantics) override book-home=X.
+    Legacy flat inbox (page_* trực tiếp, không có scans/) được caller xử lý shim."""
+    if getattr(args, "output", None):
+        return _book_paths_from_home(args.output.expanduser())
+    arg_str = str(arg)
+    looks_like_path = ("/" in arg_str) or ("\\" in arg_str) or arg.expanduser().is_dir()
+    if looks_like_path:
+        book_home = arg.expanduser()
+    else:
+        book_home = _resolve_data_root(args) / arg_str
+    return _book_paths_from_home(book_home)
+
+
 def _resolve_output_root(args: argparse.Namespace, inbox_dir: Path, slug: str) -> Path:
-    """Quyết định output root (F3). Ưu tiên: --output > SCAN2EBOOK_OUTPUT_ROOT/<slug>
-    > mặc định <inbox-parent>/../output/<slug>."""
-    if args.output:
-        return args.output.expanduser()
-    env_root = os.environ.get("SCAN2EBOOK_OUTPUT_ROOT")
-    if env_root:
-        return Path(env_root).expanduser() / slug
-    return inbox_dir.parent.parent / "output" / slug
+    """DEPRECATED shim — trả `work/` zone (cache root) cho code gọi cũ.
+
+    Giữ tên+chữ ký để không vỡ caller cũ; semantics đổi: giờ trả book_home/work
+    (nơi chứa cache OCR + book.md), KHÔNG còn là thư mục output phẳng. epub cuối
+    nằm ở dist/ (xem _build_book). Ưu tiên giống _resolve_book_paths."""
+    if getattr(args, "output", None):
+        return args.output.expanduser() / ZONE_WORK
+    return _resolve_data_root(args) / slug / ZONE_WORK
 
 
-def _build_book(ocr_dir: Path, output_root: Path, inbox_dir: Path, meta: dict, *, suffix: str = "") -> dict:
-    """Merge ocr_dir → book{suffix}.md → build book{suffix}.epub. Trả epub_result + paths.
+def _build_book(bp: BookPaths, scans_dir: Path, meta: dict, *, suffix: str = "") -> dict:
+    """Merge bp.ocr_dir → book.md (work/) → build epub. Trả epub_result + paths.
 
-    `suffix=".smoke"` dùng cho mini epub (không ghi đè book.epub thật)."""
-    book_md = output_root / f"book{suffix}.md"
+    Zone routing:
+      - book.md / book.smoke.md  → work/ (cache, regenerable)
+      - epub cuối (suffix="")     → dist/<slug>.epub (deliverable)
+      - smoke epub (suffix=".smoke") → work/book.smoke.epub (không là deliverable)
+      - cover                     → scans/cover.jpg (nguồn user)
+    """
+    book_md = bp.work_dir / f"book{suffix}.md"
     stats = post_process.merge_pages(
-        input_dir=ocr_dir, output_path=book_md,
+        input_dir=bp.ocr_dir, output_path=book_md,
         title=meta["title"], author=meta["author"], lang=meta["lang"], year=meta["year"],
     )
-    book_epub = output_root / f"book{suffix}.epub"
-    cover = inbox_dir / "cover.jpg"
+    if suffix:
+        # Smoke epub là sản phẩm phụ kiểm thử → giữ trong work/, không vào dist/.
+        book_epub = bp.work_dir / f"book{suffix}.epub"
+    else:
+        # epub cuối: dist/<slug>.epub (tên slug = đồng nhất với upload rename).
+        book_epub = bp.dist_dir / f"{bp.book_home.name}.epub"
+    book_epub.parent.mkdir(parents=True, exist_ok=True)
+    cover = scans_dir / "cover.jpg"
     epub_result = epub_build.build_epub(
         input_md=book_md, output_epub=book_epub, cover=cover if cover.exists() else None,
     )
@@ -232,16 +300,18 @@ def _build_book(ocr_dir: Path, output_root: Path, inbox_dir: Path, meta: dict, *
 
 
 def _run_prepass_or_abort(
-    *, api_key, model, inbox_dir, max_tokens, on_event
+    *, api_key, model, scans_dir, work_dir, max_tokens, on_event
 ) -> tuple[str, float] | None:
     """Chạy context pre-pass TRƯỚC OCR loop. Trả (block, cost_usd) hoặc None (abort).
 
-    Resume-aware: nếu context.json đã tồn tại → cache hit (cost 0, không gọi API),
-    nên gọi ở cả smoke lẫn full đều an toàn (full sau smoke = cache hit). FAIL (API/
-    parse) → emit context_fail + trả None để caller abort (exit != 0, KHÔNG tiêu cost OCR)."""
+    `scans_dir`: đọc ảnh mẫu. `work_dir`: ghi/đọc cache context.{json,md}.
+    Resume-aware: nếu context.json đã tồn tại ở work_dir → cache hit (cost 0, không
+    gọi API), nên gọi ở cả smoke lẫn full đều an toàn (full sau smoke = cache hit).
+    FAIL (API/parse) → emit context_fail + trả None để caller abort (exit != 0)."""
     try:
         res = context_prepass.run_prepass(
-            api_key, model, inbox_dir, IMAGE_PATTERNS, max_tokens=max_tokens
+            api_key, model, scans_dir, IMAGE_PATTERNS, max_tokens=max_tokens,
+            out_dir=work_dir,
         )
     except RuntimeError as exc:
         if on_event:
@@ -277,24 +347,25 @@ def _prepass_fail_summary(mode: str, stage: str, ocr_dir: Path) -> int:
 
 
 def run_full_pipeline(
-    args, inbox_dir, output_root, ocr_dir, meta, mode, human_out, api_key,
+    args, bp: BookPaths, meta, mode, human_out, api_key,
     carried_cost: float = 0.0,
 ) -> int:
     """OCR toàn bộ → post → epub → upload. Resume-safe (smoke đã OCR sẽ skip).
 
+    Đọc ảnh từ bp.scans_dir, cache vào bp.work_dir/bp.ocr_dir, epub → bp.dist_dir.
     `carried_cost`: cost đã tiêu ở smoke phase (prepass one-off) khi full chạy SAU
     smoke. Full prepass = cache hit (cost 0) nên phải fold carried_cost vào tổng để
     summary không under-count spend."""
     on_event, collector, _ = _make_ocr_emitter(mode)
     prepass = _run_prepass_or_abort(
-        api_key=api_key, model=args.model, inbox_dir=inbox_dir,
+        api_key=api_key, model=args.model, scans_dir=bp.scans_dir, work_dir=bp.work_dir,
         max_tokens=context_prepass.CONTEXT_MAX_TOKENS, on_event=on_event,
     )
     if prepass is None:
-        return _prepass_fail_summary(mode, "all", ocr_dir)
+        return _prepass_fail_summary(mode, "all", bp.ocr_dir)
     block, prepass_cost = prepass
     summary = ocr.run_batch(
-        api_key=api_key, input_dir=inbox_dir, output_dir=ocr_dir,
+        api_key=api_key, input_dir=bp.scans_dir, output_dir=bp.ocr_dir,
         model=args.model, workers=args.workers, pattern=IMAGE_PATTERNS,
         max_tokens=args.max_tokens, on_event=on_event, prompt_context=block,
     )
@@ -305,7 +376,7 @@ def run_full_pipeline(
     # prepass_cost: full thường = cache hit (0). carried_cost: prepass đã tiêu ở smoke.
     total_prepass_cost = prepass_cost + carried_cost
     cost = (collector.cost_usd() if collector else summary["cost_usd"]) + total_prepass_cost
-    paths = {"ocr_dir": str(ocr_dir.resolve())}
+    paths = {"ocr_dir": str(bp.ocr_dir.resolve())}
 
     # Blank đã auto-placeholder (không tính fail). Chỉ abort khi còn fail thật.
     if summary["fail"] > 0:
@@ -319,7 +390,7 @@ def run_full_pipeline(
     if summary["blank"] > 0:
         print(f"OCR: {summary['blank']} blank page → placeholder, tiếp tục build.", file=human_out)
 
-    built = _build_book(ocr_dir, output_root, inbox_dir, meta)
+    built = _build_book(bp, bp.scans_dir, meta)
     stats = built["stats"]
     print(f"Merged: {stats['pages_merged']} pages, {stats['chars']} chars, h1={stats['h1']} h2={stats['h2']} footnotes={stats['footnotes']}", file=human_out)
     size_kb = built["epub_result"]["size_bytes"] // 1024
@@ -340,8 +411,8 @@ def run_full_pipeline(
     return 0
 
 
-def run_smoke_gate(args, inbox_dir, output_root, ocr_dir, meta, mode, human_out, api_key):
-    """Smoke: OCR ≤10 trang vào ocr_dir → mini epub → ước cost full → gate.
+def run_smoke_gate(args, bp: BookPaths, meta, mode, human_out, api_key):
+    """Smoke: OCR ≤10 trang vào bp.ocr_dir → mini epub → ước cost full → gate.
 
     Trả về:
       - float → đã duyệt, caller chạy full pipeline; giá trị = prepass cost đã tiêu
@@ -353,14 +424,14 @@ def run_smoke_gate(args, inbox_dir, output_root, ocr_dir, meta, mode, human_out,
     interactive 'y', và non-tty thì abort (không treo `input()`)."""
     on_event, collector, _ = _make_ocr_emitter(mode)
     prepass = _run_prepass_or_abort(
-        api_key=api_key, model=args.model, inbox_dir=inbox_dir,
+        api_key=api_key, model=args.model, scans_dir=bp.scans_dir, work_dir=bp.work_dir,
         max_tokens=context_prepass.CONTEXT_MAX_TOKENS, on_event=on_event,
     )
     if prepass is None:
-        return _prepass_fail_summary(mode, "smoke", ocr_dir)
+        return _prepass_fail_summary(mode, "smoke", bp.ocr_dir)
     block, prepass_cost = prepass
     summary = ocr.run_batch(
-        api_key=api_key, input_dir=inbox_dir, output_dir=ocr_dir,
+        api_key=api_key, input_dir=bp.scans_dir, output_dir=bp.ocr_dir,
         model=args.model, workers=args.workers, pattern=IMAGE_PATTERNS,
         limit=10, max_tokens=args.max_tokens, on_event=on_event, prompt_context=block,
     )
@@ -371,21 +442,21 @@ def run_smoke_gate(args, inbox_dir, output_root, ocr_dir, meta, mode, human_out,
                 stage="smoke", status="partial",
                 pages=(collector.pages() if collector else {}),
                 cost_usd=(collector.cost_usd() if collector else summary["cost_usd"]),
-                paths={"ocr_dir": str(ocr_dir.resolve())},
+                paths={"ocr_dir": str(bp.ocr_dir.resolve())},
                 extra={"error": f"{summary['fail']} smoke page fail; kiểm tra ảnh/key trước khi chạy full"}))
         else:
             print(f"\nSmoke có {summary['fail']} page fail. Sửa rồi chạy lại.", file=sys.stderr)
         return 1
 
-    # Mini epub từ ≤10 trang đã OCR (file riêng book.smoke.* — không đụng book.epub).
-    built = _build_book(ocr_dir, output_root, inbox_dir, meta, suffix=".smoke")
+    # Mini epub từ ≤10 trang đã OCR (file riêng book.smoke.* — không đụng epub thật).
+    built = _build_book(bp, bp.scans_dir, meta, suffix=".smoke")
     smoke_epub = built["book_epub"]
     size_kb = built["epub_result"]["size_bytes"] // 1024
     print(f"✓ smoke epub: {smoke_epub} ({size_kb}KB)", file=human_out)
 
     # Ước cost FULL cho số trang còn lại (chưa OCR). Tính SAU smoke nên phản ánh
     # đúng phần còn lại (10 trang smoke đã loại khỏi pending).
-    remaining, total = ocr.collect_pending_pages(inbox_dir, IMAGE_PATTERNS, ocr_dir, None)
+    remaining, total = ocr.collect_pending_pages(bp.scans_dir, IMAGE_PATTERNS, bp.ocr_dir, None)
     # Giá/trang đo THẬT từ smoke (cost token-based) chính xác hơn flat $0.05; chỉ
     # dùng khi có ≥1 trang OCR ok, else fallback hằng số (tránh chia 0).
     smoke_ocr_cost = collector.cost_usd() if collector else summary["cost_usd"]
@@ -408,7 +479,7 @@ def run_smoke_gate(args, inbox_dir, output_root, ocr_dir, meta, mode, human_out,
             stage="smoke", status="smoke",
             pages=(collector.pages() if collector else {}),
             cost_usd=smoke_cost,
-            paths={"ocr_dir": str(ocr_dir.resolve()),
+            paths={"ocr_dir": str(bp.ocr_dir.resolve()),
                    "smoke_epub": str(smoke_epub.resolve())},
             extra={"est_full_cost_usd": round(est_full, 4),
                    "remaining_pages": len(remaining),

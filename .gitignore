@@ -1,5 +1,10 @@
+# Secrets / credentials (never commit)
 .env
-.env.local
+.env.*
+!.env.example
+*.key
+*.pem
+rclone.conf
 
 # Pipeline output / state
 inbox/

@@ -85,14 +85,14 @@ def test_cmd_init_creates_skeleton(tmp_path: Path):
     import argparse
 
     args = argparse.Namespace(
-        slug="my-book", base=tmp_path, from_dir=None,
+        slug="my-book", home=tmp_path, from_dir=None,
         title="Sách Của Tôi", author="Ai Đó", lang="vi", year="2020",
     )
     rc = cli.cmd_init(args)
     assert rc == 0
-    inbox = tmp_path / "my-book"
-    assert inbox.is_dir()
-    meta = json.loads((inbox / "metadata.json").read_text(encoding="utf-8"))
+    scans = tmp_path / "my-book" / "scans"
+    assert scans.is_dir()  # layout mới: ảnh + metadata vào scans/
+    meta = json.loads((scans / "metadata.json").read_text(encoding="utf-8"))
     assert meta["title"] == "Sách Của Tôi"
     assert meta["author"] == "Ai Đó"
 
@@ -107,39 +107,39 @@ def test_cmd_init_imports_and_renames(tmp_path: Path):
         (src / n).write_bytes(b"x")
 
     args = argparse.Namespace(
-        slug="b", base=tmp_path / "inbox", from_dir=src,
+        slug="b", home=tmp_path / "root", from_dir=src,
         title=None, author=None, lang="vi", year=None,
     )
     rc = cli.cmd_init(args)
     assert rc == 0
-    inbox = tmp_path / "inbox" / "b"
-    pages = sorted(p.name for p in inbox.glob("page_*"))
+    scans = tmp_path / "root" / "b" / "scans"
+    pages = sorted(p.name for p in scans.glob("page_*"))
     assert pages == ["page_001.png", "page_002.jpg", "page_003.jpg"]
     # title fallback = slug khi không truyền --title
-    meta = json.loads((inbox / "metadata.json").read_text(encoding="utf-8"))
+    meta = json.loads((scans / "metadata.json").read_text(encoding="utf-8"))
     assert meta["title"] == "b"
 
 
 def test_cmd_init_refuses_reimport_when_pages_exist(tmp_path: Path):
-    """Re-import vào inbox đã có page_* phải abort (rc=2), không để page rác."""
+    """Re-import vào scans/ đã có page_* phải abort (rc=2), không để page rác."""
     import argparse
 
-    inbox = tmp_path / "inbox" / "b"
-    inbox.mkdir(parents=True)
-    (inbox / "page_001.png").write_bytes(b"x")  # đã có sẵn 1 page
+    scans = tmp_path / "root" / "b" / "scans"
+    scans.mkdir(parents=True)
+    (scans / "page_001.png").write_bytes(b"x")  # đã có sẵn 1 page
 
     src = tmp_path / "scan"
     src.mkdir()
     (src / "new.jpg").write_bytes(b"y")
 
     args = argparse.Namespace(
-        slug="b", base=tmp_path / "inbox", from_dir=src,
+        slug="b", home=tmp_path / "root", from_dir=src,
         title=None, author=None, lang="vi", year=None,
     )
     rc = cli.cmd_init(args)
     assert rc == 2
     # page cũ giữ nguyên, không import thêm
-    assert sorted(p.name for p in inbox.glob("page_*")) == ["page_001.png"]
+    assert sorted(p.name for p in scans.glob("page_*")) == ["page_001.png"]
 
 
 def test_import_images_deterministic_same_stem(tmp_path: Path):
@@ -159,13 +159,13 @@ def test_import_images_deterministic_same_stem(tmp_path: Path):
 def test_cmd_init_keeps_existing_metadata(tmp_path: Path):
     import argparse
 
-    inbox = tmp_path / "b"
-    inbox.mkdir()
-    (inbox / "metadata.json").write_text('{"title":"GIỮ NGUYÊN"}', encoding="utf-8")
+    scans = tmp_path / "b" / "scans"
+    scans.mkdir(parents=True)
+    (scans / "metadata.json").write_text('{"title":"GIỮ NGUYÊN"}', encoding="utf-8")
     args = argparse.Namespace(
-        slug="b", base=tmp_path, from_dir=None,
+        slug="b", home=tmp_path, from_dir=None,
         title="Mới", author=None, lang="vi", year=None,
     )
     cli.cmd_init(args)
-    meta = json.loads((inbox / "metadata.json").read_text(encoding="utf-8"))
+    meta = json.loads((scans / "metadata.json").read_text(encoding="utf-8"))
     assert meta["title"] == "GIỮ NGUYÊN"  # không ghi đè

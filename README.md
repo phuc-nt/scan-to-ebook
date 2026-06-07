@@ -42,6 +42,53 @@ cp .env.example .env && $EDITOR .env   # paste OPENROUTER_API_KEY=...
 Pass `--yes` to skip the confirmation prompt, or `--upload` to push the finished
 EPUB to Google Drive (requires a configured rclone remote).
 
+## For agents and automated pipelines
+
+If you are an AI agent (or CI script) handed this repo and asked to "make an
+EPUB from the scans in `<folder>`", this is the canonical non-interactive path.
+
+**Prerequisites you cannot set up yourself — verify these first.** Run
+`scan2ebook doctor --json` and require every `essential: true` check to report
+`ok: true` before spending anything:
+
+| Check | Essential | If missing |
+| --- | --- | --- |
+| `python` (≥ 3.10) | yes | install Python 3.10+ |
+| `pandoc` | yes | `brew install pandoc` (or apt) |
+| `openrouter_key` | yes | the user must provide an OpenRouter API key + credit |
+| `rclone` | no | only needed for `--upload` |
+| `heic_convert` | no | only needed for HEIC/HEIF input (one of sips/magick/heif-convert/pillow-heif) |
+
+The OpenRouter API key, account credit, and the key's spend cap are **user
+actions you cannot perform** — they require signup, payment, and dashboard
+access. Surface them to the user; do not try to work around them.
+
+**Injecting the key (no interactive editor):** write one `KEY=VALUE` line to
+`.env` at the repo root (no `export`, no surrounding quotes), or export it in the
+environment. A shell `export` always wins over `.env`.
+
+```bash
+printf 'OPENROUTER_API_KEY=%s\n' "$OPENROUTER_API_KEY" > .env   # or set it in the env
+```
+
+**Happy path (cost-gated, machine-readable):**
+
+```bash
+.venv/bin/scan2ebook doctor --json                       # gate: every essential check ok
+.venv/bin/scan2ebook init <slug> --from <folder>          # register the book
+.venv/bin/scan2ebook all <slug> --dry-run --json          # estimate cost, no API spend
+.venv/bin/scan2ebook all <slug> --smoke --yes --json      # OCR 10 pages, then full run, no prompt
+# result EPUB: ~/scan2ebook/<slug>/dist/<slug>.epub  (path also in the JSON `paths` field)
+```
+
+`--json` prints one summary object to stdout (human logs go to stderr);
+`--json-lines` streams NDJSON events. The summary carries
+`status` (`ok`/`partial`/`error`/`smoke`/`dry-run`), `pages`, `cost_usd`, and
+`paths`. **Exit codes:** `0` success, `1` partial/failed pages, `2` user error
+(bad args, missing input). The run is resumable — re-running after a crash or a
+raised credit cap skips already-OCR'd pages, so retrying is cheap and safe.
+Override the model with `--model` or the `OCR_MODEL` env var.
+
 ## Documentation
 
 - [Product overview](docs/product-overview.md) — problem, audience, value, non-goals

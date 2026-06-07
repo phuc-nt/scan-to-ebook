@@ -31,9 +31,32 @@ _VN_ORDINAL = (
 _HEADING_NUM = rf"(?:[\dIVXLCDM]+|thứ\s+{_VN_ORDINAL}|{_VN_ORDINAL})"
 _KEYWORDS = r"(?:CHƯƠNG|Chương|PHẦN|Phần|HỒI|Hồi|THIÊN|Thiên|QUYỂN|Quyển)"
 
+# Đuôi hợp lệ SAU keyword+số: hết dòng, HOẶC dấu câu tiêu đề (: . - —) rồi tiêu đề.
+# Tiêu đề sau dấu phải không bắt đầu bằng chữ THƯỜNG tiếng Việt (văn xuôi "...của",
+# "...với" → loại). Chặn `.*` cũ nuốt cả đoạn văn mở bằng "Phần thứ hai...".
+# Lưu ý: nhoa/thường xét THỦ CÔNG (không IGNORECASE) vì IGNORECASE phá phân biệt này.
+_LOWER_VN = "a-zàáảãạăằắẳẵặâầấẩẫậeèéẻẽẹêềếểễệiìíỉĩịoòóỏõọôồốổỗộơờớởỡợuùúủũụưừứửữựyỳýỷỹỵđ"
+_HEADING_TAIL = rf"(?:\s*$|\s*[:.\-–—]\s*[^{_LOWER_VN}\s].*$)"
+# Độ dài tối đa cả dòng heading — heading thật ngắn; đoạn văn dài thì loại.
+_HEADING_MAX_LEN = 80
+
 CHAPTER_PATTERNS = [
-    re.compile(rf"^\s*({_KEYWORDS}\s+{_HEADING_NUM}\b.*)$", re.IGNORECASE),
+    re.compile(rf"^\s*({_KEYWORDS}\s+{_HEADING_NUM}\b{_HEADING_TAIL})"),
 ]
+
+
+def _is_chapter_heading(line: str) -> bool:
+    """True nếu `line` là dòng heading chương thật (không phải văn xuôi mở bằng từ khoá).
+
+    Kết hợp 2 lớp chặn false-positive:
+    1. Độ dài: heading thật ngắn (≤ _HEADING_MAX_LEN). Đoạn văn 400 chữ → loại.
+    2. Đuôi hợp lệ: sau keyword+số phải hết dòng hoặc dấu câu tiêu đề + tiêu đề
+       (không bắt đầu bằng chữ thường tiếng Việt). "Phần thứ hai của..." → loại.
+    """
+    stripped = line.strip()
+    if len(stripped) > _HEADING_MAX_LEN:
+        return False
+    return any(p.match(stripped) for p in CHAPTER_PATTERNS)
 
 CODE_FENCE_OPEN = re.compile(r"^```(?:markdown|md)?\s*$")
 CODE_FENCE_CLOSE = re.compile(r"^```\s*$")
@@ -90,19 +113,14 @@ def upgrade_chapter_headings(text: str) -> str:
         if stripped.startswith("# ") or stripped.startswith("## "):
             if stripped.startswith("## "):
                 body = stripped[3:].strip()
-                if any(p.match(body) for p in CHAPTER_PATTERNS):
+                if _is_chapter_heading(body):
                     out_lines.append(f"# {body}")
                     continue
             out_lines.append(line)
             continue
-        matched = False
-        for pat in CHAPTER_PATTERNS:
-            m = pat.match(stripped)
-            if m:
-                out_lines.append(f"# {m.group(1).strip()}")
-                matched = True
-                break
-        if not matched:
+        if _is_chapter_heading(stripped):
+            out_lines.append(f"# {stripped}")
+        else:
             out_lines.append(line)
     return "\n".join(out_lines)
 

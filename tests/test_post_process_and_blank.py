@@ -93,12 +93,14 @@ def test_merge_pages_footnotes_unique_across_pages(tmp_path: Path):
 # --------------------------------------------------------- P1: heading variety
 
 def _is_heading(line: str) -> bool:
-    return any(p.match(line) for p in post_process.CHAPTER_PATTERNS)
+    return post_process._is_chapter_heading(line)
 
 
 def test_heading_matches_variety():
+    # Heading thật: ĐỨNG RIÊNG (ngắn), hoặc kèm tiêu đề IN HOA sau dấu câu.
     for s in ["Chương I", "CHƯƠNG 5", "Hồi thứ nhất", "Phần thứ hai",
-              "Quyển II", "Chương mười", "HỒI thứ ba"]:
+              "Quyển II", "Chương mười", "HỒI thứ ba",
+              "CHƯƠNG I: NGÀY TRỞ VỀ", "Phần thứ nhất - MỞ ĐẦU"]:
         assert _is_heading(s), f"phải nhận diện heading: {s!r}"
 
 
@@ -106,6 +108,35 @@ def test_heading_no_false_positive():
     for s in ["Phần lớn dân chúng", "Hồi đó tôi còn nhỏ",
               "Chương trình nghị sự", "Thiên nhiên tươi đẹp"]:
         assert not _is_heading(s), f"không được nhận nhầm: {s!r}"
+
+
+def test_heading_no_false_positive_prose_starting_with_keyword():
+    """REGRESSION: văn xuôi MỞ bằng 'Phần thứ <chữ>' + tiếp chữ thường KHÔNG là heading.
+
+    Bug thật (aragong-q1-quarter): regex cũ có đuôi `.*` nuốt cả đoạn ~400 chữ →
+    'Phần thứ hai của tiểu thuyết...' thành # h1 (sai + split chương giả trong epub).
+    Chặn bằng: đuôi sau số phải hết-dòng / dấu-câu+IN-HOA, và cả dòng phải ngắn.
+    """
+    prose = [
+        "Phần thứ hai của tiểu thuyết kể chuyện Catơrin Ximônitzê (Catherine "
+        "Simonidzé), bố là trùm tư sản dầu lửa ở Giêorgi, ruồng bỏ vợ.",
+        "Phần cuối cùng với hình ảnh Clara Zetkin ở Đại hội Balơ họp trong một "
+        "tòa nhà thờ giữa những hồi chuông ngân vang báo hiệu tương lai.",
+        "Chương ba mở ra một khung cảnh hoàn toàn khác với những gì đã kể.",
+    ]
+    for s in prose:
+        assert not _is_heading(s), f"đoạn văn KHÔNG được thành heading: {s[:50]!r}"
+
+
+def test_upgrade_keeps_prose_starting_with_keyword_as_paragraph():
+    """End-to-end: upgrade_chapter_headings KHÔNG đụng đoạn văn mở bằng 'Phần thứ hai'."""
+    text = (
+        "Phần thứ hai của tiểu thuyết kể chuyện Catơrin, bố là trùm tư sản dầu "
+        "lửa ở Giêorgi, ruồng bỏ vợ nên mấy mẹ con sang sống ở Pari."
+    )
+    out = post_process.upgrade_chapter_headings(text)
+    assert not out.lstrip().startswith("#"), "đoạn văn bị nâng nhầm thành heading"
+    assert out == text  # giữ nguyên 100%
 
 
 def test_upgrade_chapter_heading_promotes_to_h1():

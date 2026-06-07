@@ -246,13 +246,23 @@ def _book_paths_from_home(book_home: Path) -> BookPaths:
 def _resolve_book_paths(args: argparse.Namespace, arg: Path) -> BookPaths:
     """Resolve book-home + zones từ positional `arg` của `all` (slug HOẶC path).
 
-    Rule (R2): `arg` là PATH nếu có separator HOẶC là thư mục tồn tại; else là SLUG
-    (ghép vào data-root). `--output X` (deprecated semantics) override book-home=X.
-    Legacy flat inbox (page_* trực tiếp, không có scans/) được caller xử lý shim."""
+    Rule (R2): `arg` là PATH nếu chứa separator (`/` hoặc `\\`); else là SLUG
+    (ghép vào data-root). Quyết định CHỈ dựa separator — KHÔNG dò is_dir(): slug
+    trùng tên thư mục trong CWD vẫn phải resolve về data-root, không bị CWD nuốt.
+    Lưu ý: `Path("./x")` bị Python normalize thành `Path("x")` (mất separator) nên
+    KHÔNG ép được path mode — muốn trỏ path thật, dùng path tuyệt đối hoặc có thư
+    mục cha (vd `sub/x`, `/abs/x`). `--output X` (deprecated
+    semantics) override book-home=X. Legacy flat inbox (page_* trực tiếp, không có
+    scans/) được caller xử lý shim."""
     if getattr(args, "output", None):
+        print(
+            "WARN: --output deprecated — bỏ flag và dùng slug/path positional "
+            "(layout mới: <home>/<slug>/{scans,work,dist}/).",
+            file=sys.stderr,
+        )
         return _book_paths_from_home(args.output.expanduser())
     arg_str = str(arg)
-    looks_like_path = ("/" in arg_str) or ("\\" in arg_str) or arg.expanduser().is_dir()
+    looks_like_path = ("/" in arg_str) or ("\\" in arg_str)
     if looks_like_path:
         book_home = arg.expanduser()
     else:

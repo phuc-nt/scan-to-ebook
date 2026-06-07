@@ -1,4 +1,8 @@
-# scan-to-ebook
+<p align="center">
+  <img src="assets/logo-512.png" alt="scan-to-ebook logo" width="160" height="160">
+</p>
+
+<h1 align="center">scan-to-ebook</h1>
 
 Turn scanned paper books (PNG/JPG/HEIC/HEIF) into EPUBs you can read in Books.app
 or on a Kindle. The pipeline runs OCR through an OpenRouter vision model,

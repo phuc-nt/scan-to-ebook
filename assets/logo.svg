@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-label="scan-to-ebook logo">
+  <title>scan-to-ebook — scan frame capturing a page</title>
+  <!-- Variant E: a flat, modern scan/capture viewfinder (four orange corner
+       brackets) framing a page with text lines + a fold corner = ebook.
+       Flat-design, no isometric stack. -->
+
+  <!-- page / document being scanned -->
+  <rect x="58" y="40" width="84" height="112" rx="6" fill="#ededed" />
+  <!-- folded ebook corner (top-right) -->
+  <polygon points="142,40 142,64 118,40" fill="#ffffff" />
+  <polygon points="118,40 142,64 118,64" fill="#c9c9c9" />
+
+  <!-- text lines (the captured content) -->
+  <rect x="70" y="62" width="50" height="6" rx="3" fill="#9a9a9a" />
+  <rect x="70" y="78" width="60" height="6" rx="3" fill="#bcbcbc" />
+  <rect x="70" y="94" width="60" height="6" rx="3" fill="#bcbcbc" />
+  <rect x="70" y="110" width="44" height="6" rx="3" fill="#bcbcbc" />
+  <rect x="70" y="126" width="56" height="6" rx="3" fill="#bcbcbc" />
+
+  <!-- scan corner brackets (orange viewfinder) -->
+  <g fill="#e04422">
+    <!-- top-left -->
+    <path d="M34 60 L34 34 L60 34 L60 46 L46 46 L46 60 Z" />
+    <!-- top-right -->
+    <path d="M166 60 L166 34 L140 34 L140 46 L154 46 L154 60 Z" />
+    <!-- bottom-left -->
+    <path d="M34 132 L34 158 L60 158 L60 146 L46 146 L46 132 Z" />
+    <!-- bottom-right -->
+    <path d="M166 132 L166 158 L140 158 L140 146 L154 146 L154 132 Z" />
+  </g>
+
+  <!-- scan sweep line -->
+  <rect x="40" y="94" width="120" height="4" rx="2" fill="#e04422" opacity="0.55" />
+</svg>

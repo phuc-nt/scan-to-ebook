@@ -78,6 +78,29 @@ def test_book_paths_output_override(tmp_path):
     assert bp.work_dir == tmp_path / "X" / "work"
 
 
+def test_book_paths_output_override_warns(tmp_path, capsys):
+    # M1: --output deprecated → cảnh báo stderr (mirror SCAN2EBOOK_OUTPUT_ROOT).
+    pipeline._resolve_book_paths(_args(output=tmp_path / "X"), Path("ignored-slug"))
+    assert "deprecated" in capsys.readouterr().err.lower()
+
+
+def test_book_paths_slug_not_swallowed_by_cwd_dir(tmp_path, monkeypatch):
+    # H1: slug trần trùng tên thư mục trong CWD vẫn resolve về data-root, KHÔNG
+    # bị CWD nuốt (quyết định path chỉ dựa separator, không dò is_dir()).
+    monkeypatch.delenv("SCAN2EBOOK_OUTPUT_ROOT", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "mybook").mkdir()  # bẫy: dir cùng tên slug ngay trong CWD
+    bp = pipeline._resolve_book_paths(_args(home=tmp_path / "root"), Path("mybook"))
+    assert bp.book_home == tmp_path / "root" / "mybook"
+
+
+def test_book_paths_relative_dir_is_path_mode(tmp_path, monkeypatch):
+    # H1: path có separator (thư mục cha) → path mode, ghép từ CWD.
+    monkeypatch.chdir(tmp_path)
+    bp = pipeline._resolve_book_paths(_args(), Path("sub/mybook"))
+    assert bp.book_home == Path("sub/mybook")
+
+
 # --------------------------------------------- _resolve_output_root shim (work/)
 
 def test_resolve_output_root_shim_returns_work(tmp_path, monkeypatch):

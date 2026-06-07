@@ -77,7 +77,7 @@ rclone lsd gdrive:
 
 ## Chuẩn bị scan
 
-Sách giấy cần được scan thành PNG hoặc JPG, mỗi trang một file. App Phúc đang dùng là vFlat trên iPhone — auto crop, auto deskew, output PNG. Adobe Scan và ScannerPro cũng tốt. Tránh chụp thường bằng camera vì lệch perspective.
+Sách giấy cần được scan thành PNG, JPG, HEIC hoặc HEIF, mỗi trang một file. App Phúc đang dùng là vFlat trên iPhone — auto crop, auto deskew, output PNG. Adobe Scan và ScannerPro cũng tốt. iPhone mặc định chụp HEIC/HEIF — pipeline tự động convert sang JPG tại stage import, không cần bước thêm. Tránh chụp thường bằng camera vì lệch perspective.
 
 Cách nhanh nhất: dùng lệnh `init` để tạo inbox + import ảnh + rename tự động (xem mục "Tạo inbox nhanh" bên dưới). Pipeline dùng **natural-sort** nên tên file không bắt buộc zero-pad — `page_5.png`..`page_80.png` vẫn sort đúng số học. Tuy vậy đặt `page_001.png`, `page_002.png`... vẫn gọn và dễ đọc hơn.
 
@@ -90,7 +90,7 @@ ls *.png | nl | while read n f; do
 done
 ```
 
-Pipeline nhận cả **PNG lẫn JPG/JPEG** — không cần convert.
+Pipeline nhận cả **PNG, JPG/JPEG, HEIC, HEIF** — HEIC/HEIF tự convert qua macOS `sips` (macOS-only). Trên Linux/CI, nếu gặp HEIC file sẽ báo lỗi rõ với tên file và gợi ý convert thủ công trước (`heif-convert`, `magick`) rồi import lại — không bao giờ skip im lặng (im lặng = mất trang = sách hỏng).
 
 DPI tối thiểu khuyến nghị là 300 DPI cho text rõ ràng. Vision model tolerate được DPI thấp hơn nhưng dấu Việt có thể đoán sai.
 
@@ -128,9 +128,26 @@ scan2ebook init namphong-q01 --from ~/Desktop/scan-output \
   --title "Nam Phong Tạp Chí Q01 (1917)" --author "Phạm Quỳnh"
 ```
 
-Kết quả: tạo `~/Books-inbox/namphong-q01/`, copy + natural-sort + rename ảnh từ `--from` thành `page_001.<ext>`..., và ghi `metadata.json` từ các cờ `--title/--author/--lang/--year`. Đổi thư mục gốc bằng `--base`.
+Kết quả: tạo `~/Books-inbox/namphong-q01/`, copy + natural-sort + rename ảnh từ `--from` thành `page_001.<ext>`..., và ghi `metadata.json` từ các cờ `--title/--author/--lang/--year`. HEIC/HEIF file tự động convert→JPG trong quá trình này (EXIF + orientation được giữ nguyên). Đổi thư mục gốc bằng `--base`.
 
 Bỏ `--from` nếu muốn tự copy ảnh sau (lệnh chỉ tạo folder + metadata mẫu). `metadata.json` đã tồn tại sẽ được giữ nguyên, không ghi đè. Nếu inbox đã có file `page_*`, `init --from` sẽ báo lỗi (rc=2) thay vì import — xoá page cũ trước rồi chạy lại, tránh để lại page rác bị OCR nhầm (tốn tiền).
+
+## Bối cảnh sách (context.json)
+
+Trước khi OCR từng trang, pipeline tự động trích bối cảnh sách (title, author, translator, pages_per_image, table_of_contents, proper names, terminology, layout notes) từ 15 sample ảnh. Kết quả lưu thành `context.json` và `context.md` trong thư mục inbox.
+
+**context.json** (source-of-truth, hand-editable)
+- Tệp JSON cấu trúc chứa metadata sách và OCR guidance
+- **Hand-editable**: nếu phát hiện lỗi (ví dụ `pages_per_image` detect sai 1 thay vì 2), edit trực tiếp JSON và re-run (cache hit, cost 0)
+- Khi resume (chạy lại sách cũ), pipeline kiểm tra `context.json` tồn tại → skip API, re-derive guidance từ JSON
+- Thay đổi tay: sửa `pages_per_image`, tên riêng, hay tên sách trong JSON → chạy lại sẽ sử dụng giá trị mới
+
+**context.md** (mirror, chỉ đọc)
+- Render đã format của `context.json`, dùng để xem nhanh bên ngoài editor
+- Header comment: "edit context.json to change" — file này tự động generate từ JSON
+- Chỉnh sửa `context.md` đơn lẻ **sẽ bị bỏ qua** (JSON là authoritative), chỉnh sửa không có tác dụng
+
+**Ví dụ**: sách dịch từ Pháp, OCR detect đúng translator nhưng sai tên riêng. Mở `inbox/namphong-q01/context.json`, tìm `"proper_names"` array, sửa "Miraben" → "Miraudy" (canonical), save. Chạy lại `scan2ebook all ~/Books-inbox/namphong-q01`, pipeline sẽ dùng context cache này (cost 0) và OCR toàn bộ với tên đúng.
 
 ## Smoke test sách mới (--smoke gate)
 

@@ -130,11 +130,34 @@ Phúc đặt PNG trong thư mục bất kỳ Phúc chọn (thường là `~/Book
 
 `cover.jpg` optional, đặt cùng inbox dir. Pandoc tự embed nếu có.
 
+## Context pre-pass + resume cache
+
+Pipeline chạy **context pre-pass** ở đầu (stage 0) trước OCR. Nếu `inbox/<slug>/context.json` đã tồn tại hợp lệ → skip API call (cache hit, cost 0). Smoke + full chạy lần lượt SHARE một prepass — smoke lần đầu tiêu chi phí prepass (~$0.09), full lần sau cache hit (cost 0). Nếu prepass fail (API error hoặc JSON parse fail) → **abort pipeline** (exit != 0, không tiêu OCR cost), emit `context_fail` event. Thông tin prepass (metadata, pages_per_image, tên riêng, mục lục) được append vào base OCR PROMPT; base PROMPT byte-for-byte unchanged.
+
+**Spread handling**: Nếu `pages_per_image >= 2` (LLM detect ảnh trang đôi), context block sẽ emit spread guidance ("ẢNH TRANG ĐÔI: mỗi ảnh có 2 trang"). Nếu `pages_per_image = 1` (sách đơn trang) → không emit spread, tự động correct. Giá trị `pages_per_image` LLM-detected, có thể **sửa tay** trong `context.json` nếu detect sai.
+
+**Hand-edit context.json**: Nếu phát hiện lỗi (ví dụ translator tên sai, pages_per_image detect 1 thay vì 2), edit `context.json` trực tiếp (không sửa `.md` — file đó chỉ là mirror, tự generate từ JSON). Re-run sẽ cache hit (cost 0) + dùng giá trị mới trong OCR. Context.md cũng tự update khi cache re-derive.
+
 ## Khi gặp lỗi
 
-Trước khi báo lỗi cho Phúc, đọc log + log từ stderr. Pipeline có 3 failure mode quen thuộc, bạn xử lý trước rồi mới report. Một là HTTP 402 hoặc 403 nghĩa là OpenRouter credit/key cap, Phúc cần raise cap trên dashboard — bạn dừng pipeline, báo Phúc kèm cost đã chi, đợi Phúc raise xong rồi rerun (resumable picks up). Hai là blank page (Gemini trả `empty content (finish_reason=stop)`) thường gặp ở trang bìa/cover/divider; mở ảnh xem có thật blank không, nếu blank thật thì viết placeholder `<!-- blank page -->` vào `.md` rồi tiếp tục. Ba là pandoc warn duplicate footnote `[^1]` cross-page — non-fatal, epub vẫn valid, mention 1 dòng ngắn rồi bỏ qua.
+Trước khi báo lỗi cho Phúc, đọc log + log từ stderr.
+
+**Context pre-pass fail** (context_fail event): API error, JSON parse fail, hoặc non-dict response. Pipeline abort (exit 1, no OCR spend). Báo Phúc chi phí prepass đã hoàn thành / lỗi gì, Phúc check API key / rate limit, re-run (resumable).
+
+Pipeline có 3 failure mode khác quen thuộc, bạn xử lý trước rồi mới report. Một là HTTP 402 hoặc 403 nghĩa là OpenRouter credit/key cap, Phúc cần raise cap trên dashboard — bạn dừng pipeline, báo Phúc kèm cost đã chi, đợi Phúc raise xong rồi rerun (resumable picks up). Hai là blank page (Gemini trả `empty content (finish_reason=stop)`) thường gặp ở trang bìa/cover/divider; mở ảnh xem có thật blank không, nếu blank thật thì viết placeholder `<!-- blank page -->` vào `.md` rồi tiếp tục. Ba là pandoc warn duplicate footnote `[^1]` cross-page — non-fatal, epub vẫn valid, mention 1 dòng ngắn rồi bỏ qua.
 
 Lỗi khác (HTTP 5xx, network timeout) đã có retry built-in 2 lần. Nếu vẫn fail sau retry, log đủ rõ, bạn rerun resumable 1 lần nữa rồi hỏi Phúc nếu vẫn fail.
+
+## JSON output events (context pre-pass)
+
+Khi dùng `--json` hoặc `--json-lines`, pipeline emit 2 event mới:
+
+| Event | Payload | Ý nghĩa |
+|-------|---------|---------|
+| `context_ok` | `{title, translator, pages_per_image, toc_entries, proper_names, cost_usd, from_cache}` | Prepass thành công. `from_cache=true` → skip API, cost_usd=0. `pages_per_image` là giá trị detected (1 hoặc 2). |
+| `context_fail` | `{error}` | Prepass fail (API error hay JSON parse fail). Pipeline abort, exit 1, no OCR spend. Error message chứa chi tiết lỗi. |
+
+Các event OCR ban đầu (`page_ok`, `page_fail`, `done`) vẫn như cũ, `done` payload không chứa prepass cost. Prepass cost được fold vào tổng cost khi report (xem `--json` summary, khóa `prepass_cost_usd` ở `extra`).
 
 ## Đụng đến code
 

@@ -16,17 +16,26 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import unicodedata
 from pathlib import Path
 
-from . import drive_upload, epub_build, json_output, ocr, post_process
+from . import context_prepass, drive_upload, epub_build, json_output, ocr, post_process
 
 # Giá ước lượng Gemini 3.1 Pro Preview ~$0.05/page (đo ở Phase 0, 1 ảnh A4).
 EST_COST_PER_PAGE = 0.05
 
-# Multi-ext glob mặc định cho stage `all` (vFlat=PNG, Adobe Scan=JPG).
+# Multi-ext glob cho OCR stage (`all`): chỉ png/jpg/jpeg — định dạng vision API +
+# pandoc đọc trực tiếp. Sau khi import, mọi ảnh ĐÃ là jpg/png nên đây là đủ.
 IMAGE_PATTERNS = "*.png,*.jpg,*.jpeg,*.PNG,*.JPG,*.JPEG"
+
+# Glob cho IMPORT stage (`init --from`): thêm HEIC/HEIF (iPhone mặc định chụp HEIC).
+# HEIC sẽ được convert→JPG lúc import nên OCR stage không bao giờ thấy HEIC thô.
+IMPORT_PATTERNS = IMAGE_PATTERNS + ",*.heic,*.heif,*.HEIC,*.HEIF"
+
+# Đuôi cần convert sang JPG trước khi OCR (vision API + pandoc không đọc HEIC/HEIF).
+_HEIC_SUFFIXES = {".heic", ".heif"}
 
 
 def _slugify(text: str) -> str:
@@ -140,19 +149,57 @@ def _print_dry_run(
     return 0
 
 
+def _convert_heic(src: Path, dst: Path) -> None:
+    """Convert HEIC/HEIF → JPG bằng macOS `sips`. dst phải có đuôi .jpg.
+
+    iPhone mặc định chụp HEIC — định dạng vision API + pandoc KHÔNG đọc được.
+    Convert lúc import (1 lần, không lặp mỗi OCR retry). Giữ EXIF/orientation.
+
+    sips là macOS-only: guard bằng shutil.which. Nếu thiếu (Linux/CI) → raise
+    lỗi rõ tên file + cách xử lý thủ công. KHÔNG silent-skip (mất trang = sách hỏng).
+    """
+    if shutil.which("sips") is None:
+        raise RuntimeError(
+            f"cần `sips` để convert HEIC nhưng không tìm thấy (macOS-only): {src.name}. "
+            "Trên Linux/CI hãy convert HEIC→JPG thủ công trước "
+            "(vd: `heif-convert`/`magick`) rồi import lại."
+        )
+    result = subprocess.run(
+        ["sips", "-s", "format", "jpeg", str(src), "--out", str(dst)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 or not dst.exists():
+        # Dọn file out dở dang (sips ghi 1 phần rồi fail) → tránh để lại JPG hỏng.
+        dst.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"sips convert HEIC thất bại (rc={result.returncode}) cho {src.name}: "
+            f"{result.stderr.strip()}"
+        )
+
+
 def _import_images(src: Path, dst: Path) -> int:
     """Copy ảnh từ src vào dst, natural-sort rename page_NNN.<ext>. Returns count.
 
-    Gộp bước copy + rename thủ công. Giữ extension gốc (png/jpg). Zero-pad 3
+    Gộp bước copy + rename thủ công. Giữ extension gốc (png/jpg); HEIC/HEIF được
+    convert→jpg lúc này (xem _convert_heic) nên output dir chỉ có png/jpg — vision
+    API + pandoc đọc trực tiếp, OCR stage không bao giờ thấy HEIC thô. Zero-pad 3
     chữ số cho gọn (natural-sort vẫn chạy nếu không pad, nhưng pad đẹp hơn)."""
+    # IMPORT_PATTERNS gồm cả HEIC để glob thấy đủ ảnh nguồn (iPhone = HEIC mặc định).
+    # KHÔNG-trùng page_NNN dựa vào _glob_patterns dedupe theo Path (quan trọng trên
+    # FS case-insensitive: *.heic + *.HEIC khớp cùng 1 file) → giữ dedupe đó khi sửa.
     # suffix là tie-break: cùng stem khác ext (scan_1.jpg/scan_1.png) cho thứ tự
     # ổn định thay vì phụ thuộc insertion order của glob.
     imgs = sorted(
-        ocr._glob_patterns(src, IMAGE_PATTERNS),
+        ocr._glob_patterns(src, IMPORT_PATTERNS),
         key=lambda p: (ocr.natural_sort_key(p), p.suffix.lower()),
     )
+    # 1 enumerate trên toàn list đã sort → page_NNN tuần tự bất kể nguồn jpg hay heic.
     for i, img in enumerate(imgs, start=1):
-        shutil.copy2(img, dst / f"page_{i:03d}{img.suffix.lower()}")
+        if img.suffix.lower() in _HEIC_SUFFIXES:
+            _convert_heic(img, dst / f"page_{i:03d}.jpg")
+        else:
+            shutil.copy2(img, dst / f"page_{i:03d}{img.suffix.lower()}")
     return len(imgs)
 
 
@@ -184,19 +231,80 @@ def _build_book(ocr_dir: Path, output_root: Path, inbox_dir: Path, meta: dict, *
     return {"stats": stats, "epub_result": epub_result, "book_md": book_md, "book_epub": book_epub}
 
 
-def run_full_pipeline(args, inbox_dir, output_root, ocr_dir, meta, mode, human_out, api_key) -> int:
-    """OCR toàn bộ → post → epub → upload. Resume-safe (smoke đã OCR sẽ skip)."""
+def _run_prepass_or_abort(
+    *, api_key, model, inbox_dir, max_tokens, on_event
+) -> tuple[str, float] | None:
+    """Chạy context pre-pass TRƯỚC OCR loop. Trả (block, cost_usd) hoặc None (abort).
+
+    Resume-aware: nếu context.json đã tồn tại → cache hit (cost 0, không gọi API),
+    nên gọi ở cả smoke lẫn full đều an toàn (full sau smoke = cache hit). FAIL (API/
+    parse) → emit context_fail + trả None để caller abort (exit != 0, KHÔNG tiêu cost OCR)."""
+    try:
+        res = context_prepass.run_prepass(
+            api_key, model, inbox_dir, IMAGE_PATTERNS, max_tokens=max_tokens
+        )
+    except RuntimeError as exc:
+        if on_event:
+            on_event("context_fail", {"error": str(exc)})
+        return None
+    ctx = res["context"]
+    if on_event:
+        on_event(
+            "context_ok",
+            {
+                "title": ctx.get("title"),
+                "translator": ctx.get("translator"),
+                "pages_per_image": ctx.get("pages_per_image"),
+                "toc_entries": len(ctx.get("table_of_contents") or []),
+                "proper_names": len(ctx.get("proper_names") or []),
+                "cost_usd": res["cost_usd"],
+                "from_cache": res["from_cache"],
+            },
+        )
+    return res["block"], res["cost_usd"]
+
+
+def _prepass_fail_summary(mode: str, stage: str, ocr_dir: Path) -> int:
+    """In summary/err khi pre-pass fail. Trả 1 (abort, không tiêu cost OCR)."""
+    if mode == "json":
+        json_output.print_summary(json_output.build_summary(
+            stage=stage, status="error", pages={}, cost_usd=0.0,
+            paths={"ocr_dir": str(ocr_dir.resolve())},
+            extra={"error": "context pre-pass failed; xem log stderr, sửa rồi chạy lại"}))
+    else:
+        print("\nContext pre-pass thất bại — abort (không tiêu cost OCR). Xem log trên.", file=sys.stderr)
+    return 1
+
+
+def run_full_pipeline(
+    args, inbox_dir, output_root, ocr_dir, meta, mode, human_out, api_key,
+    carried_cost: float = 0.0,
+) -> int:
+    """OCR toàn bộ → post → epub → upload. Resume-safe (smoke đã OCR sẽ skip).
+
+    `carried_cost`: cost đã tiêu ở smoke phase (prepass one-off) khi full chạy SAU
+    smoke. Full prepass = cache hit (cost 0) nên phải fold carried_cost vào tổng để
+    summary không under-count spend."""
     on_event, collector, _ = _make_ocr_emitter(mode)
+    prepass = _run_prepass_or_abort(
+        api_key=api_key, model=args.model, inbox_dir=inbox_dir,
+        max_tokens=context_prepass.CONTEXT_MAX_TOKENS, on_event=on_event,
+    )
+    if prepass is None:
+        return _prepass_fail_summary(mode, "all", ocr_dir)
+    block, prepass_cost = prepass
     summary = ocr.run_batch(
         api_key=api_key, input_dir=inbox_dir, output_dir=ocr_dir,
         model=args.model, workers=args.workers, pattern=IMAGE_PATTERNS,
-        max_tokens=args.max_tokens, on_event=on_event,
+        max_tokens=args.max_tokens, on_event=on_event, prompt_context=block,
     )
     pages = collector.pages() if collector else {
         "ok": summary["ok"], "blank": summary["blank"], "fail": summary["fail"],
         "skipped": summary["skipped"], "total": summary["total"],
     }
-    cost = collector.cost_usd() if collector else summary["cost_usd"]
+    # prepass_cost: full thường = cache hit (0). carried_cost: prepass đã tiêu ở smoke.
+    total_prepass_cost = prepass_cost + carried_cost
+    cost = (collector.cost_usd() if collector else summary["cost_usd"]) + total_prepass_cost
     paths = {"ocr_dir": str(ocr_dir.resolve())}
 
     # Blank đã auto-placeholder (không tính fail). Chỉ abort khi còn fail thật.
@@ -227,7 +335,8 @@ def run_full_pipeline(args, inbox_dir, output_root, ocr_dir, meta, mode, human_o
 
     if mode == "json":
         json_output.print_summary(json_output.build_summary(
-            stage="all", status="ok", pages=pages, cost_usd=cost, paths=paths))
+            stage="all", status="ok", pages=pages, cost_usd=cost, paths=paths,
+            extra={"prepass_cost_usd": round(total_prepass_cost, 4)}))
     return 0
 
 
@@ -235,16 +344,25 @@ def run_smoke_gate(args, inbox_dir, output_root, ocr_dir, meta, mode, human_out,
     """Smoke: OCR ≤10 trang vào ocr_dir → mini epub → ước cost full → gate.
 
     Trả về:
-      - None  → đã duyệt, caller chạy full pipeline (resume-safe, skip 10 trang đã OCR).
+      - float → đã duyệt, caller chạy full pipeline; giá trị = prepass cost đã tiêu
+        ở smoke (one-off) để full fold vào tổng cost cuối (full = cache hit, cost 0,
+        nên nếu không carry sẽ under-count spend ~$0.09). Resume-safe (skip 10 trang đã OCR).
       - int   → gate dừng tại đây (chưa duyệt / json gate / non-tty), caller return luôn.
 
     Invariant an toàn: KHÔNG bao giờ tiêu cost full khi chưa có `--yes`,
     interactive 'y', và non-tty thì abort (không treo `input()`)."""
     on_event, collector, _ = _make_ocr_emitter(mode)
+    prepass = _run_prepass_or_abort(
+        api_key=api_key, model=args.model, inbox_dir=inbox_dir,
+        max_tokens=context_prepass.CONTEXT_MAX_TOKENS, on_event=on_event,
+    )
+    if prepass is None:
+        return _prepass_fail_summary(mode, "smoke", ocr_dir)
+    block, prepass_cost = prepass
     summary = ocr.run_batch(
         api_key=api_key, input_dir=inbox_dir, output_dir=ocr_dir,
         model=args.model, workers=args.workers, pattern=IMAGE_PATTERNS,
-        limit=10, max_tokens=args.max_tokens, on_event=on_event,
+        limit=10, max_tokens=args.max_tokens, on_event=on_event, prompt_context=block,
     )
     if summary["fail"] > 0:
         # Smoke fail ngay → đừng ước cost / gate, báo lỗi để user sửa input/key.
@@ -270,14 +388,18 @@ def run_smoke_gate(args, inbox_dir, output_root, ocr_dir, meta, mode, human_out,
     remaining, total = ocr.collect_pending_pages(inbox_dir, IMAGE_PATTERNS, ocr_dir, None)
     # Giá/trang đo THẬT từ smoke (cost token-based) chính xác hơn flat $0.05; chỉ
     # dùng khi có ≥1 trang OCR ok, else fallback hằng số (tránh chia 0).
-    smoke_cost = collector.cost_usd() if collector else summary["cost_usd"]
-    per_page = (smoke_cost / summary["ok"]) if summary["ok"] > 0 else EST_COST_PER_PAGE
+    smoke_ocr_cost = collector.cost_usd() if collector else summary["cost_usd"]
+    # per_page CHỈ tính từ OCR cost (không gồm prepass) → ước full chính xác cho phần
+    # còn lại. prepass là one-off, full sau smoke = cache hit (cost 0) nên không cộng vào est_full.
+    per_page = (smoke_ocr_cost / summary["ok"]) if summary["ok"] > 0 else EST_COST_PER_PAGE
     est_full = len(remaining) * per_page
+    smoke_cost = smoke_ocr_cost + prepass_cost  # tổng đã tiêu ở smoke (OCR + prepass one-off)
 
-    # --yes: agent/CI cố ý bỏ qua prompt → chạy full luôn.
+    # --yes: agent/CI cố ý bỏ qua prompt → chạy full luôn. Trả prepass_cost (float)
+    # để full fold vào tổng cost cuối (full = cache hit nên không tự tính lại).
     if args.yes:
         print(f"--yes: tiếp tục full (~${est_full:.2f} cho {len(remaining)} trang còn lại).", file=human_out)
-        return None
+        return prepass_cost
 
     # json/json-lines mode: không prompt được → in summary gate, exit 0 (gate có
     # chủ đích, KHÔNG phải lỗi). Agent đọc est_full_cost_usd, hỏi user, re-invoke --yes.
@@ -285,12 +407,13 @@ def run_smoke_gate(args, inbox_dir, output_root, ocr_dir, meta, mode, human_out,
         json_output.print_summary(json_output.build_summary(
             stage="smoke", status="smoke",
             pages=(collector.pages() if collector else {}),
-            cost_usd=(collector.cost_usd() if collector else summary["cost_usd"]),
+            cost_usd=smoke_cost,
             paths={"ocr_dir": str(ocr_dir.resolve()),
                    "smoke_epub": str(smoke_epub.resolve())},
             extra={"est_full_cost_usd": round(est_full, 4),
                    "remaining_pages": len(remaining),
                    "total_pages": total,
+                   "prepass_cost_usd": round(prepass_cost, 4),
                    "message": "pass --yes to run full"}))
         return 0
 
@@ -306,6 +429,6 @@ def run_smoke_gate(args, inbox_dir, output_root, ocr_dir, meta, mode, human_out,
     # Human interactive: prompt y/N. Chỉ 'y'/'Y' mới chạy full.
     answer = input(f"\nFull run ≈ ${est_full:.2f} cho {len(remaining)} trang còn lại. Continue? [y/N] ").strip().lower()
     if answer == "y":
-        return None
+        return prepass_cost  # float → caller chạy full, carry prepass cost vào tổng
     print(f"Aborted. Smoke epub giữ ở {smoke_epub}.", file=human_out)
     return 0

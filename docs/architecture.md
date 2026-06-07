@@ -1,10 +1,12 @@
 # Kiến trúc
 
-## Pipeline 4 stage
+## Pipeline 5 stage
 
-Pipeline chia thành 4 stage tuần tự, mỗi stage là một module Python độc lập trong `src/scan_to_ebook/`. Mỗi stage đọc filesystem state của stage trước và ghi output xuống filesystem cho stage sau. Không có in-memory queue, không có database, không có process daemon.
+Pipeline chia thành 5 stage tuần tự, mỗi stage là một module Python độc lập trong `src/scan_to_ebook/`. Mỗi stage đọc filesystem state của stage trước và ghi output xuống filesystem cho stage sau. Không có in-memory queue, không có database, không có process daemon.
 
-Stage 1 là OCR. Input là một thư mục PNG/JPG, mỗi file là một trang. Output là một thư mục `.md`, mỗi trang một file `page_NNN.md`. Module này gọi OpenRouter API qua urllib stdlib (không có httpx/requests dependency), encode ảnh base64, gửi prompt verified cho Gemini 3.1 Pro Preview, nhận markdown thuần về. ThreadPoolExecutor chạy 4 worker song song (configurable `--workers`) để tận dụng concurrent HTTP. Resumable: trước khi gọi API cho mỗi trang, check xem `output/page_NNN.md` đã có và non-empty chưa, nếu có thì skip. File `.md` ghi atomic (tmp + `os.replace`) để write bị ngắt giữa chừng không để lại file nửa-ghi đánh lừa resume check. Retry 2 lần với exponential backoff (1s, 2.5s, 5s) trên transient errors (HTTP 429, HTTP 5xx, timeout, empty content, malformed JSON). Trang trống thật (response rỗng + `finish_reason=stop`) KHÔNG retry mà tự ghi placeholder `<!-- blank page -->`, không tính fail. CLI hỗ trợ `--dry-run` (đếm trang todo + ước lượng chi phí, không gọi API), `--max-tokens` (default 12000), và env `OCR_MODEL` override model mặc định.
+**Stage 0: Context Pre-Pass** (mới). Trước khi OCR từng trang, pipeline gọi `context_prepass.py` để trích bối cảnh sách từ 15 sample ảnh (7 trang đầu + 4 giữa + 4 cuối, natural-sort). Một multi-image call duy nhất tới OpenRouter để detect title, author, translator, publisher, year, `pages_per_image` (LLM tự phát hiện xem ảnh có 1 hay 2 trang), mục lục, tên riêng + chính tả chuẩn, thuật ngữ, layout, footnote convention, OCR pitfalls. Kết quả persist vào `inbox/<slug>/context.json` (source-of-truth, hand-editable) + `inbox/<slug>/context.md` (mirror render, có note "edit .json thay vì file này"). Prepass **cache-aware**: nếu `context.json` đã tồn tại hợp lệ → skip API, cost 0, re-derive block từ JSON. Prepass **abort-on-fail**: API error hay JSON parse fail → emit `context_fail` event + abort pipeline (exit != 0, không tiêu OCR cost). Mẫu ảnh downscale ~1200px (sips macOS-only, fallback full-res Linux) để tránh HTTP 413; ảnh gốc full-res giữ nguyên cho OCR thực. Spread guidance ("ẢNH TRANG ĐÔI") được render vào block CHỈ khi `pages_per_image >= 2` (conditional per-book, không hardcode base PROMPT). Smoke + full share một prepass (cost counted once, full = cache hit).
+
+**Stage 1: OCR** (trước gọi là Stage 1). Input là một thư mục PNG/JPG (HEIC/HEIF đã convert→JPG tại stage import trước), mỗi file là một trang. Output là một thư mục `.md`, mỗi trang một file `page_NNN.md`. Module này gọi OpenRouter API qua urllib stdlib (không có httpx/requests dependency), encode ảnh base64, gửi prompt verified cho Gemini 3.1 Pro Preview + context block từ Stage 0 append vào (base PROMPT giữ byte-for-byte unchanged), nhận markdown thuần về. ThreadPoolExecutor chạy 4 worker song song (configurable `--workers`) để tận dụng concurrent HTTP. Resumable: trước khi gọi API cho mỗi trang, check xem `output/page_NNN.md` đã có và non-empty chưa, nếu có thì skip. File `.md` ghi atomic (tmp + `os.replace`) để write bị ngắt giữa chừng không để lại file nửa-ghi đánh lừa resume check. Retry 2 lần với exponential backoff (1s, 2.5s, 5s) trên transient errors (HTTP 429, HTTP 5xx, timeout, empty content, malformed JSON). Trang trống thật (response rỗng + `finish_reason=stop`) KHÔNG retry mà tự ghi placeholder `<!-- blank page -->`, không tính fail. CLI hỗ trợ `--dry-run` (đếm trang todo + ước lượng chi phí, không gọi API), `--max-tokens` (default 12000), và env `OCR_MODEL` override model mặc định.
 
 Stage 2 là post-process. Input là thư mục `.md` từ stage 1. Output là một file `book.md` đơn lẻ với YAML front matter. Module này merge tất cả `page_*.md` theo thứ tự filename (natural-sort số học), strip `` ```markdown `` wrapper nếu model lỡ thêm dù prompt cấm, renumber footnote cross-page (mỗi trang OCR đánh `[^1]` độc lập → shift theo counter chạy để `book.md` không đụng số, tránh pandoc "Duplicate note reference"; bỏ qua `[^N]` trong fenced code block), detect chapter heading bằng regex (CHƯƠNG / Chương / PHẦN / Phần / HỒI / QUYỂN / THIÊN + số La Mã, decimal, hoặc số viết chữ như "thứ nhất", "mười") rồi promote thành h1, và inject YAML metadata (title, author, lang, year) để pandoc dùng. Cross-page hyphen-fix intentionally dropped — sẽ giải thích ở phần Design decisions.
 
@@ -21,7 +23,12 @@ Stage 4 là upload (optional). Input là `book.epub`. Output là file trên Goog
 ├── metadata.json (optional)
 └── cover.jpg (optional)
             │
-            ▼  Stage 1: ocr.py
+            ▼  Stage 0: context_prepass.py
+~/Books-inbox/<slug>/                  (auto-created)
+├── context.json (source-of-truth, hand-editable)
+└── context.md (render, mirror)
+            │ (cached for resume + full: no API cost)
+            ▼  Stage 1: ocr.py (context block appended to PROMPT)
 ~/Books-inbox/../output/<slug>/ocr/    (auto-created)
 ├── page_001.md
 ├── page_002.md
@@ -57,6 +64,7 @@ scan-to-ebook/
 │   └── operations.md
 └── src/scan_to_ebook/
     ├── __init__.py
+    ├── context_prepass.py # Stage 0
     ├── ocr.py             # Stage 1
     ├── post_process.py    # Stage 2
     ├── epub_build.py      # Stage 3

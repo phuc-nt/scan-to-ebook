@@ -206,11 +206,26 @@ def ocr_page(
     raise last_exc
 
 
+def _glob_patterns(input_dir: Path, pattern: str) -> list[Path]:
+    """Glob 1 hoặc nhiều pattern (phân tách bằng dấu phẩy), dedupe theo path.
+
+    `pattern="*.png,*.jpg,*.jpeg"` → gộp kết quả cả 3 ext, bỏ trùng (file khớp
+    nhiều glob), trả list chưa sort. Cho phép `all` quét cả PNG lẫn JPG.
+    """
+    seen: dict[Path, None] = {}
+    for pat in (p.strip() for p in pattern.split(",") if p.strip()):
+        for path in input_dir.glob(pat):
+            seen[path] = None
+    return list(seen)
+
+
 def collect_pending_pages(
     input_dir: Path, pattern: str, output_dir: Path, limit: int | None
 ) -> tuple[list[Path], int]:
-    """Glob input, sort, filter pages đã có output non-empty. Returns (todo, total)."""
-    pages = sorted(input_dir.glob(pattern), key=natural_sort_key)
+    """Glob input, sort, filter pages đã có output non-empty. Returns (todo, total).
+
+    `pattern` chấp nhận nhiều glob phân tách dấu phẩy (vd "*.png,*.jpg")."""
+    pages = sorted(_glob_patterns(input_dir, pattern), key=natural_sort_key)
     todo = []
     for p in pages:
         md_path = output_dir / f"{p.stem}.md"

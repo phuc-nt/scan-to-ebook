@@ -40,6 +40,14 @@ số TRANG SÁCH xuất hiện trong MỘT ảnh (thường 1 hoặc 2). Dấu h
 ảnh nằm ngang (landscape) có GÁY/đường đóng gáy ở giữa, HAI khối/cột chữ tách biệt, và
 HAI số trang ở hai mép ngoài. Nếu chỉ một khối chữ + một số trang → 1. Trả về số nguyên.
 
+Mỗi ảnh mẫu được gắn nhãn TÊN FILE ngay TRƯỚC nó (dòng "[Ảnh: page_NNN.jpg]"). Dùng
+đúng tên file đó khi cần chỉ ra một ảnh cụ thể (vd trường cover_page).
+
+XÁC ĐỊNH TRANG BÌA (cover_page): trang BÌA là ảnh có TRANH/ẢNH MÀU minh hoạ bìa sách
+hoặc tên sách in lớn trang trí ở MẶT NGOÀI (thường là ảnh đầu tiên, page_001). Trả về
+TÊN FILE của ảnh bìa (vd "page_001.jpg"). Nếu các ảnh mẫu KHÔNG có bìa thật (chỉ là
+scan trắng đen trang chữ, không có ảnh/màu bìa) → trả null. KHÔNG đoán bừa.
+
 Trả về DUY NHẤT một JSON object (không giải thích, không ```json wrapper):
 {
   "title": "tên sách nếu thấy, else null",
@@ -48,6 +56,7 @@ Trả về DUY NHẤT một JSON object (không giải thích, không ```json wr
   "publisher": "nhà xuất bản nếu thấy, else null",
   "year": "năm nếu thấy, else null",
   "pages_per_image": 2,
+  "cover_page": "tên file ảnh bìa (vd page_001.jpg) nếu thấy bìa thật, else null",
   "table_of_contents": [{"title": "tên chương/phần", "page": 12}],
   "proper_names": [{"seen": "dạng xuất hiện", "canonical": "chính tả chuẩn nên dùng"}],
   "terminology": ["thuật ngữ/từ vựng cổ hoặc chuyên ngành đặc thù sách này"],
@@ -63,13 +72,16 @@ rỗng nếu không xác định. proper_names ưu tiên tên riêng lặp lại
 pages_per_image: theo hướng dẫn XÁC ĐỊNH SỐ TRANG MỖI ẢNH ở trên (số nguyên, 1 hoặc 2).
 table_of_contents: chỉ điền nếu thấy MỤC LỤC trong các trang mẫu, else mảng rỗng. KHÔNG
 coi chữ trang trí trên TRANG BÌA/TỰA ĐỀ (đầu sách) hay TRANG XUẤT BẢN/COLOPHON (cuối sách:
-tên sách, tác giả, NXB, giấy phép, giá bán) là mục lục/chương."""
+tên sách, tác giả, NXB, giấy phép, giá bán) là mục lục/chương.
+cover_page: tên file ảnh bìa thật (ảnh/màu minh hoạ bìa) theo nhãn "[Ảnh: ...]", else null."""
 
 
 def select_sample_pages(pages: list[Path]) -> list[Path]:
     """Chọn ≤15 ảnh mẫu: 7 đầu + 4 giữa + 4 cuối, dedup giữ thứ tự.
 
-    `pages` giả định đã natural-sort. ≤15 → trả hết (không dup)."""
+    `pages` giả định đã natural-sort. ≤15 → trả hết (không dup).
+    BẤT BIẾN cho cover detect: 7 ảnh ĐẦU luôn nằm trong mẫu → bìa (gần như luôn ở
+    page_001..00x) chắc chắn được pre-pass nhìn thấy. Đừng giảm số ảnh đầu xuống <1."""
     if len(pages) <= MAX_SAMPLE:
         return pages
     first = pages[:7]
@@ -113,13 +125,16 @@ def _encode_sample(path: Path) -> tuple[str, str]:
 
 
 def _post_context_once(
-    api_key: str, model: str, sample_b64s: list[tuple[str, str]], max_tokens: int
+    api_key: str, model: str, sample_b64s: list[tuple[str, str, str]], max_tokens: int
 ) -> tuple[str, dict]:
-    """1 POST đa-ảnh (1 text block + N image_url block). Reuse idiom _post_once.
+    """1 POST đa-ảnh (1 text block + N×[nhãn tên + image_url] block). Reuse _post_once.
 
-    `sample_b64s`: list (b64, mime). Raises RuntimeError trên HTTP/parse error."""
+    `sample_b64s`: list (b64, mime, name). Nhãn "[Ảnh: <name>]" emit ngay trước mỗi
+    ảnh để LLM tham chiếu được tên file (vd trả cover_page). Raises RuntimeError
+    trên HTTP/parse error."""
     content: list[dict] = [{"type": "text", "text": CONTEXT_PROMPT}]
-    for b64, mime in sample_b64s:
+    for b64, mime, name in sample_b64s:
+        content.append({"type": "text", "text": f"[Ảnh: {name}]"})
         content.append(
             {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
         )
@@ -173,7 +188,7 @@ def _post_context_once(
 
 
 def _post_and_parse_context_once(
-    api_key: str, model: str, sample_b64s: list[tuple[str, str]], max_tokens: int
+    api_key: str, model: str, sample_b64s: list[tuple[str, str, str]], max_tokens: int
 ) -> tuple[dict, dict]:
     """1 POST + parse JSON strict trong CÙNG 1 lần thử → (ctx_dict, meta).
 
@@ -196,7 +211,7 @@ def _post_and_parse_context_once(
 
 
 def _extract_with_retry(
-    api_key: str, model: str, sample_b64s: list[tuple[str, str]], max_tokens: int,
+    api_key: str, model: str, sample_b64s: list[tuple[str, str, str]], max_tokens: int,
     retries: int = 2,
 ) -> tuple[dict, dict]:
     """_post_and_parse_context_once + retry transient (malformed/parse-fail/429/5xx/timeout).
@@ -222,7 +237,8 @@ def extract_context(
 ) -> tuple[dict, dict]:
     """Gọi pre-pass đa-ảnh → strict JSON (POST+parse có retry). Raises nếu non-dict /
     thiếu cấu trúc sau khi hết retry."""
-    sample_b64s = [_encode_sample(p) for p in sample_paths]
+    # (b64, mime, name): name = filename để LLM tham chiếu (cover_page).
+    sample_b64s = [(*_encode_sample(p), p.name) for p in sample_paths]
     ctx, meta = _extract_with_retry(api_key, model, sample_b64s, max_tokens)
     ctx["_generated_by"] = model
     return ctx, meta

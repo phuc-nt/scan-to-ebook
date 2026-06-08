@@ -75,6 +75,51 @@ def _load_metadata(book_dir: Path, slug: str) -> dict:
     }
 
 
+def _backfill_metadata_from_context(scans_dir: Path, slug: str, meta: dict, ctx: dict) -> None:
+    """Backfill title/author/year/translator từ pre-pass context vào metadata.json.
+
+    CHỈ chạy khi metadata còn mặc định (title == slug) → user chưa tự đặt title.
+    Mục đích: trang init tạo metadata.json TRƯỚC pre-pass nên title=slug; nếu không
+    backfill, TOC/title-page hiện slug thay vì tên sách thật (vd `book-04`).
+
+    Mutate `meta` in-place (title/author/year) để run hiện tại dùng giá trị thật, và
+    ghi đè metadata.json (thêm `translator`, tuy build chưa render — giữ làm nguồn cho
+    pipeline-log/catalog). KHÔNG đụng `lang` (user/init chọn, pre-pass không suy ra).
+    User đã đặt title thật (title != slug) → no-op, tôn trọng lựa chọn của user.
+
+    BẤT BIẾN: `slug` ở đây PHẢI = slug đã dùng khi `_load_metadata` tạo `meta`
+    (cả hai = `bp.book_home.name`). Nếu lệch → default-detection sai (hoặc không bao
+    giờ backfill, hoặc đè title thật của user)."""
+    if meta.get("title") != slug:
+        return  # user đã đặt title thật → không ghi đè
+    ctx_title = ctx.get("title")
+    if not ctx_title or not isinstance(ctx_title, str):
+        return  # pre-pass không bắt được title → giữ slug, không đoán
+    ctx_author = ctx.get("author") if isinstance(ctx.get("author"), str) else None
+    ctx_year = ctx.get("year") if isinstance(ctx.get("year"), (str, int)) else None
+    ctx_translator = ctx.get("translator") if isinstance(ctx.get("translator"), str) else None
+
+    meta["title"] = ctx_title
+    if ctx_author:
+        meta["author"] = ctx_author
+    if ctx_year is not None:
+        meta["year"] = str(ctx_year)
+
+    meta_file = scans_dir / "metadata.json"
+    out = {
+        "title": meta["title"],
+        "author": meta.get("author"),
+        "translator": ctx_translator,
+        "lang": meta.get("lang") or "vi",
+        "year": meta.get("year"),
+    }
+    try:
+        meta_file.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(f"metadata.json backfill từ pre-pass: title={meta['title']!r}", file=sys.stderr)
+    except OSError as exc:
+        print(f"WARN không ghi được metadata.json backfill: {exc}", file=sys.stderr)
+
+
 def _make_ocr_emitter(mode: str):
     """Chọn callback on_event + collector + đích in log người theo output mode.
 
@@ -297,6 +342,34 @@ def _resolve_output_root(args: argparse.Namespace, inbox_dir: Path, slug: str) -
     return _resolve_data_root(args) / slug / ZONE_WORK
 
 
+def _resolve_cover(scans_dir: Path, work_dir: Path) -> Path | None:
+    """Chọn ảnh bìa cho epub. Thứ tự ưu tiên (cao→thấp):
+
+      1. scans/cover.jpg — user TỰ đặt → override rõ ràng, thắng tuyệt đối.
+      2. context.json[cover_page] — pre-pass dò ảnh bìa màu → trỏ scans/<cover_page>.
+      3. None — không có bìa (sách scan trắng đen, hoặc pre-pass trả null).
+
+    Trả Path tồn tại hoặc None. cover_page (từ context.json hand-editable) phải trỏ
+    một file THỰC nằm TRONG scans_dir — realpath-containment chặn path traversal
+    (../../etc) lẫn symlink trỏ ra ngoài; cover chỉ feed `pandoc --epub-cover-image`."""
+    user_cover = scans_dir / "cover.jpg"
+    if user_cover.exists():
+        return user_cover
+
+    ctx = context_prepass.load_context(work_dir)
+    if not ctx:
+        return None
+    name = ctx.get("cover_page")
+    if not name or not isinstance(name, str):
+        return None
+    # Resolve thật rồi kiểm parent == scans_dir đã resolve: subsume mọi `/`, `\\`,
+    # `..`, và symlink-escape trong 1 check (defense-in-depth, dù threat model local).
+    candidate = (scans_dir / name).resolve()
+    if not candidate.is_file() or scans_dir.resolve() not in candidate.parents:
+        return None
+    return candidate
+
+
 def _build_book(bp: BookPaths, scans_dir: Path, meta: dict, *, suffix: str = "") -> dict:
     """Merge bp.ocr_dir → book.md (work/) → build epub. Trả epub_result + paths.
 
@@ -304,7 +377,7 @@ def _build_book(bp: BookPaths, scans_dir: Path, meta: dict, *, suffix: str = "")
       - book.md / book.smoke.md  → work/ (cache, regenerable)
       - epub cuối (suffix="")     → dist/<slug>.epub (deliverable)
       - smoke epub (suffix=".smoke") → work/book.smoke.epub (không là deliverable)
-      - cover                     → scans/cover.jpg (nguồn user)
+      - cover                     → xem _resolve_cover (user cover.jpg > pre-pass cover_page)
     """
     book_md = bp.work_dir / f"book{suffix}.md"
     stats = post_process.merge_pages(
@@ -318,22 +391,27 @@ def _build_book(bp: BookPaths, scans_dir: Path, meta: dict, *, suffix: str = "")
         # epub cuối: dist/<slug>.epub (tên slug = đồng nhất với upload rename).
         book_epub = bp.dist_dir / f"{bp.book_home.name}.epub"
     book_epub.parent.mkdir(parents=True, exist_ok=True)
-    cover = scans_dir / "cover.jpg"
+    cover = _resolve_cover(scans_dir, bp.work_dir)
     epub_result = epub_build.build_epub(
-        input_md=book_md, output_epub=book_epub, cover=cover if cover.exists() else None,
+        input_md=book_md, output_epub=book_epub, cover=cover,
     )
     return {"stats": stats, "epub_result": epub_result, "book_md": book_md, "book_epub": book_epub}
 
 
 def _run_prepass_or_abort(
-    *, api_key, model, scans_dir, work_dir, max_tokens, on_event
+    *, api_key, model, scans_dir, work_dir, max_tokens, on_event,
+    meta=None, slug=None,
 ) -> tuple[str, float] | None:
     """Chạy context pre-pass TRƯỚC OCR loop. Trả (block, cost_usd) hoặc None (abort).
 
     `scans_dir`: đọc ảnh mẫu. `work_dir`: ghi/đọc cache context.{json,md}.
     Resume-aware: nếu context.json đã tồn tại ở work_dir → cache hit (cost 0, không
     gọi API), nên gọi ở cả smoke lẫn full đều an toàn (full sau smoke = cache hit).
-    FAIL (API/parse) → emit context_fail + trả None để caller abort (exit != 0)."""
+    FAIL (API/parse) → emit context_fail + trả None để caller abort (exit != 0).
+
+    `meta`+`slug`: nếu truyền → backfill title/author/year/translator từ context vào
+    metadata.json khi title còn = slug mặc định (mutate `meta` in-place). Gọi ở smoke
+    lẫn full đều idempotent (cache hit → ctx như nhau; title đã thật → no-op)."""
     try:
         res = context_prepass.run_prepass(
             api_key, model, scans_dir, IMAGE_PATTERNS, max_tokens=max_tokens,
@@ -344,6 +422,8 @@ def _run_prepass_or_abort(
             on_event("context_fail", {"error": str(exc)})
         return None
     ctx = res["context"]
+    if meta is not None and slug is not None:
+        _backfill_metadata_from_context(scans_dir, slug, meta, ctx)
     if on_event:
         on_event(
             "context_ok",
@@ -386,6 +466,7 @@ def run_full_pipeline(
     prepass = _run_prepass_or_abort(
         api_key=api_key, model=args.model, scans_dir=bp.scans_dir, work_dir=bp.work_dir,
         max_tokens=context_prepass.CONTEXT_MAX_TOKENS, on_event=on_event,
+        meta=meta, slug=bp.book_home.name,
     )
     if prepass is None:
         return _prepass_fail_summary(mode, "all", bp.ocr_dir)
@@ -452,6 +533,7 @@ def run_smoke_gate(args, bp: BookPaths, meta, mode, human_out, api_key):
     prepass = _run_prepass_or_abort(
         api_key=api_key, model=args.model, scans_dir=bp.scans_dir, work_dir=bp.work_dir,
         max_tokens=context_prepass.CONTEXT_MAX_TOKENS, on_event=on_event,
+        meta=meta, slug=bp.book_home.name,
     )
     if prepass is None:
         return _prepass_fail_summary(mode, "smoke", bp.ocr_dir)

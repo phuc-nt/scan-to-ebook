@@ -36,6 +36,7 @@ def _valid_ctx(pages_per_image: int = 2) -> dict:
         "publisher": "NXB Giáo Dục",
         "year": "1998",
         "pages_per_image": pages_per_image,
+        "cover_page": "page_001.png",
         "table_of_contents": [{"title": "Chương 1", "page": 12}],
         "proper_names": [{"seen": "Miraben", "canonical": "Miraben"}],
         "terminology": ["nhân-loại"],
@@ -58,6 +59,14 @@ def test_select_sample_152():
     assert got[:7] == pages[0:7]
     assert got[7:11] == pages[74:78]  # mid_start = (152-4)//2 = 74
     assert got[11:15] == pages[148:152]
+
+
+def test_select_sample_always_includes_first_page():
+    """BẤT BIẾN cover-detect: page_001 (bìa thường ở đây) LUÔN trong mẫu, mọi cỡ sách."""
+    for n in (3, 15, 16, 100, 500):
+        pages = [Path(f"page_{i:03d}.png") for i in range(1, n + 1)]
+        got = context_prepass.select_sample_pages(pages)
+        assert pages[0] in got, f"page_001 phải nằm trong sample (n={n})"
 
 
 def test_select_sample_exactly_15():
@@ -114,6 +123,34 @@ def test_extract_context_new_keys(tmp_path, monkeypatch):
     assert ctx["translator"] == "Phùng Văn Tửu"
     assert isinstance(ctx["pages_per_image"], int) and ctx["pages_per_image"] == 2
     assert isinstance(ctx["table_of_contents"], list)
+
+
+def test_extract_context_cover_page_parsed(tmp_path, monkeypatch):
+    """cover_page (field mới) parse được + giữ trong ctx → pipeline dùng làm bìa epub."""
+    _patch_post(monkeypatch, _valid_ctx_json())
+    pages = _fake_pages(tmp_path, 3)
+    ctx, _ = context_prepass.extract_context("k", "m", pages, 4000)
+    assert ctx["cover_page"] == "page_001.png"
+
+
+def test_extract_context_attaches_filename_labels(tmp_path, monkeypatch):
+    """Mỗi sample phải kèm (b64, mime, name) → _post_context_once nhận tên file thật.
+
+    LLM cần nhãn tên để trả cover_page; assert sample_b64s mang đúng filename."""
+    captured = {}
+
+    def fake(api_key, model, sample_b64s, max_tokens):
+        captured["samples"] = sample_b64s
+        return _valid_ctx_json(), {"usage": {}}
+
+    monkeypatch.setattr(context_prepass, "_post_context_once", fake)
+    pages = _fake_pages(tmp_path, 3)
+    context_prepass.extract_context("k", "m", pages, 4000)
+    samples = captured["samples"]
+    assert len(samples) == 3
+    # mỗi phần tử là (b64, mime, name); name = filename gốc.
+    assert all(len(s) == 3 for s in samples)
+    assert [s[2] for s in samples] == ["page_001.png", "page_002.png", "page_003.png"]
 
 
 def test_extract_context_parse_fail_raises(tmp_path, monkeypatch):

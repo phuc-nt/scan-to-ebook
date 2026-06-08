@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import sys
 
-from . import image_ops
+from . import image_ops, pdf_render
 
 
 def _check_python() -> dict:
@@ -72,9 +72,22 @@ def _check_heic() -> dict:
             "detail": f"none (HEIC import disabled). {image_ops._install_hint()}"}
 
 
+def _check_pdf_render() -> dict:
+    """Backend render PDF optional — chỉ cần khi import từ file .pdf.
+
+    Vắng = warning (sách ảnh JPG/PNG/HEIC vẫn chạy). Có ≥1 backend → liệt kê."""
+    backends = pdf_render.available_backends()
+    if backends:
+        return {"name": "pdf_render", "ok": True, "essential": False,
+                "detail": f"available: {', '.join(backends)}"}
+    return {"name": "pdf_render", "ok": False, "essential": False,
+            "detail": f"none (PDF import disabled). {pdf_render._install_hint()}"}
+
+
 def run_checks() -> list[dict]:
     """Chạy tất cả check. Trả list dict{name, ok, essential, detail}. Không in gì."""
-    return [_check_python(), _check_pandoc(), _check_key(), _check_heic(), _check_rclone()]
+    return [_check_python(), _check_pandoc(), _check_key(), _check_heic(),
+            _check_pdf_render(), _check_rclone()]
 
 
 def all_essential_ok(results: list[dict]) -> bool:

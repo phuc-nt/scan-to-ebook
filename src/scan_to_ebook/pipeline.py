@@ -21,7 +21,7 @@ import unicodedata
 from pathlib import Path
 from typing import NamedTuple
 
-from . import context_prepass, drive_upload, epub_build, image_ops, json_output, ocr, post_process
+from . import context_prepass, drive_upload, epub_build, image_ops, json_output, ocr, pdf_render, post_process
 
 # Giá ước lượng Gemini 3.1 Pro Preview ~$0.05/page (đo ở Phase 0, 1 ảnh A4).
 EST_COST_PER_PAGE = 0.05
@@ -37,6 +37,9 @@ IMPORT_PATTERNS = IMAGE_PATTERNS + ",*.heic,*.heif,*.HEIC,*.HEIF"
 # Đuôi cần convert sang JPG trước khi OCR (vision API + pandoc không đọc HEIC/HEIF).
 # Nguồn sự thật ở image_ops; alias giữ cho code/test cũ tham chiếu.
 _HEIC_SUFFIXES = image_ops.HEIC_SUFFIXES
+
+# Đuôi nhận diện PDF input (`init --from book.pdf`) → render từng trang → page_NNN.jpg.
+_PDF_SUFFIXES = pdf_render.PDF_SUFFIXES
 
 
 def _slugify(text: str) -> str:
@@ -184,6 +187,19 @@ def _import_images(src: Path, dst: Path) -> int:
         else:
             shutil.copy2(img, dst / f"page_{i:03d}{img.suffix.lower()}")
     return len(imgs)
+
+
+def _import_pdf(pdf: Path, dst: Path, dpi: int = pdf_render.DEFAULT_DPI) -> int:
+    """Render mọi trang PDF → dst/page_NNN.jpg (giống _import_images nhưng nguồn PDF).
+
+    Render vào thư mục tạm trong dst (prefix _pdfpage) qua pdf_render backend-chain
+    rồi rename tuần tự page_NNN.jpg + dọn file render thô. Output dir sau cùng chỉ
+    có page_NNN.jpg → OCR + pandoc đọc trực tiếp, không bao giờ thấy PDF. Returns
+    số trang đã render."""
+    pages = pdf_render.render_pdf_to_images(pdf, dst, dpi=dpi)
+    for i, rendered in enumerate(pages, start=1):
+        rendered.rename(dst / f"page_{i:03d}.jpg")
+    return len(pages)
 
 
 # Tên thư mục gốc chứa toàn bộ sách (1 sách = 1 thư mục con). Visible trong Finder/

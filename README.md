@@ -15,9 +15,9 @@
 </p>
 
 scan-to-ebook converts photos or scans of a paper book (PNG / JPG / HEIC / HEIF)
-into an EPUB you can read in Books.app or on a Kindle. It runs each page through
-an OpenRouter vision model for OCR, cleans and merges the text with the Python
-standard library, and builds the EPUB with pandoc.
+— or a PDF of the book — into an EPUB you can read in Books.app or on a Kindle.
+It runs each page through an OpenRouter vision model for OCR, cleans and merges the
+text with the Python standard library, and builds the EPUB with pandoc.
 
 It was built for **hard Vietnamese corpora** and verified with **zero OCR errors**
 on an early-Quốc-ngữ journal (Nam Phong, 1917 — 75 pages) and on a 152-image
@@ -40,6 +40,10 @@ output before running your own book.
 - **Book-aware OCR** — a context pre-pass reads a handful of sample pages first to
   detect the title, proper names, spelling conventions, and two-page spreads, then
   feeds that back into every page's prompt for consistent results.
+- **Image or PDF input** — point it at a folder of page images or at a single PDF
+  of the book; PDFs are rendered to per-page JPGs at import (`pdftoppm` → `magick`
+  → `sips`). Works on born-digital PDFs whose text layer is broken — it OCRs the
+  rendered pages, never the garbled text.
 - **Cross-platform HEIC/HEIF** — iPhone photos are auto-converted to JPG at import,
   trying `sips` (macOS) → ImageMagick `magick` → `heif-convert` → `pillow-heif`,
   whichever is available.
@@ -88,8 +92,8 @@ cp .env.example .env && $EDITOR .env   # set OPENROUTER_API_KEY=...
 # 4. Check everything is ready (python / pandoc / key / HEIC backend)
 .venv/bin/scan2ebook doctor
 
-# 5. Register a book and run it
-.venv/bin/scan2ebook init my-book --from ~/path/to/scanned-images
+# 5. Register a book and run it (--from takes an image folder OR a single .pdf)
+.venv/bin/scan2ebook init my-book --from ~/path/to/scanned-images   # or: --from ~/path/to/book.pdf
 .venv/bin/scan2ebook all my-book --smoke
 ```
 
@@ -135,6 +139,7 @@ from the scans in `<folder>`", this is the canonical non-interactive path.
 | `openrouter_key` | yes | the user must provide an OpenRouter API key + credit |
 | `rclone` | no | only for `--upload` |
 | `heic_convert` | no | only for HEIC/HEIF input (one of sips/magick/heif-convert/pillow-heif) |
+| `pdf_render` | no | only for PDF input (one of pdftoppm/magick/sips — poppler or imagemagick+ghostscript) |
 
 The API key, account credit, and the key's spend cap require signup, payment, and
 dashboard access — **surface these to the user; do not work around them.**

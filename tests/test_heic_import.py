@@ -13,8 +13,6 @@ Convert gi·ªù cross-platform (sips/magick/heif-convert/pillow-heif). Test mock ·
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from scan_to_ebook import image_ops, pipeline

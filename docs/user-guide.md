@@ -79,6 +79,8 @@ rclone lsd gdrive:
 
 Sách giấy cần được scan thành PNG, JPG, HEIC hoặc HEIF, mỗi trang một file. App Phúc đang dùng là vFlat trên iPhone — auto crop, auto deskew, output PNG. Adobe Scan và ScannerPro cũng tốt. iPhone mặc định chụp HEIC/HEIF — pipeline tự động convert sang JPG tại stage import, không cần bước thêm. Tránh chụp thường bằng camera vì lệch perspective.
 
+Ngoài ảnh scan, bạn cũng có thể bắt đầu từ một file PDF của sách (chẳng hạn từ Calibre hoặc scan PDF từ app scanner). Pipeline sẽ render từng trang PDF thành JPG rồi chạy qua OCR pipeline bình thường — không trích text layer (PDF born-digital thường có encoding hỏng).
+
 Cách nhanh nhất: dùng lệnh `init` để tạo inbox + import ảnh + rename tự động (xem mục "Tạo inbox nhanh" bên dưới). Pipeline dùng **natural-sort** nên tên file không bắt buộc zero-pad — `page_5.png`..`page_80.png` vẫn sort đúng số học. Tuy vậy đặt `page_001.png`, `page_002.png`... vẫn gọn và dễ đọc hơn.
 
 Nếu muốn rename thủ công (app scan đặt tên khác như vFlat `IMG_001.png`):
@@ -90,7 +92,7 @@ ls *.png | nl | while read n f; do
 done
 ```
 
-Pipeline nhận cả **PNG, JPG/JPEG, HEIC, HEIF** — HEIC/HEIF tự convert qua chain backend (sips macOS → magick ImageMagick → heif-convert → pillow-heif, first available). Cross-platform: Windows/macOS/Linux tất cả supported. Nếu NO backend available, raise error (mất trang = sách hỏng, never skip silent).
+Pipeline nhận cả **PNG, JPG/JPEG, HEIC, HEIF, PDF**. Ảnh được xử lý bằng cách chuyển đổi HEIC/HEIF qua chain backend (sips macOS → magick ImageMagick → heif-convert → pillow-heif, first available). File PDF được render từng trang thành JPG qua backend-chain: pdftoppm (poppler) → magick (ImageMagick + Ghostscript) → sips (macOS, single-page fallback). Cross-platform: Windows/macOS/Linux tất cả supported. Nếu NO backend available (HEIC/PDF), raise error (mất trang = sách hỏng, never skip silent). Lệnh `doctor` hiển thị backend nào có sẵn (warning only nếu thiếu).
 
 DPI tối thiểu khuyến nghị là 300 DPI cho text rõ ràng. Vision model tolerate được DPI thấp hơn nhưng dấu Việt có thể đoán sai.
 
@@ -121,14 +123,19 @@ Thư mục scans hoàn chỉnh trông như sau (ở `~/scan2ebook/<slug>/scans/`
 
 ## Tạo inbox nhanh
 
-Lệnh `init` gộp các bước chuẩn bị (tạo folder + scans zone, copy ảnh, rename `page_NNN`, sinh `metadata.json` mẫu) thành một lệnh.
+Lệnh `init` gộp các bước chuẩn bị (tạo folder + scans zone, copy ảnh / render PDF, rename `page_NNN`, sinh `metadata.json` mẫu) thành một lệnh.
 
 ```bash
+# Từ thư mục ảnh
 scan2ebook init namphong-q01 --from ~/Desktop/scan-output \
   --title "Nam Phong Tạp Chí Q01 (1917)" --author "Phạm Quỳnh"
+
+# Hoặc từ file PDF
+scan2ebook init chuyen-thu --from ~/Books/book.pdf \
+  --title "Chuyện Thứ" --author "Nguyễn Văn Tác"
 ```
 
-Kết quả: tạo `~/scan2ebook/namphong-q01/scans/`, copy + natural-sort + rename ảnh từ `--from` thành `page_001.<ext>`..., và ghi `metadata.json` vào `scans/`. HEIC/HEIF file tự động convert→JPG trong quá trình này (EXIF + orientation được giữ nguyên). Override data root bằng `--home`.
+Kết quả: tạo `~/scan2ebook/{slug}/scans/`, copy + natural-sort + rename ảnh từ `--from` thành `page_001.<ext>`..., và ghi `metadata.json` vào `scans/`. Nếu `--from` là PDF, pipeline render từng trang thành `page_NNN.jpg` rồi đặt vào scans/. HEIC/HEIF file tự động convert→JPG trong quá trình này (EXIF + orientation được giữ nguyên). Override data root bằng `--home`.
 
 Bỏ `--from` nếu muốn tự copy ảnh sau (lệnh chỉ tạo folder + metadata mẫu). `metadata.json` đã tồn tại sẽ được giữ nguyên, không ghi đè. Nếu `scans/` đã có file `page_*`, `init --from` sẽ báo lỗi (rc=2) thay vì import — xoá page cũ trước rồi chạy lại, tránh để lại page rác bị OCR nhầm (tốn tiền).
 
@@ -315,7 +322,7 @@ scan2ebook ocr ~/Books-inbox/namphong-q01 ~/output/ocr --json-lines > events.ndj
 |---|---|
 | `scan2ebook doctor` | Self-check môi trường (python/pandoc/key/rclone) |
 | `scan2ebook doctor --json` | Self-check, JSON output |
-| `scan2ebook init <slug> --from <dir>` | Tạo book + scans zone + import ảnh + metadata mẫu |
+| `scan2ebook init <slug> --from <dir\|book.pdf>` | Tạo book + scans zone + import ảnh / render PDF + metadata mẫu |
 | `scan2ebook ocr <slug-or-path> <out>` | Stage 1: OCR per page (slug hoặc explicit book-home path) |
 | `scan2ebook ocr <slug-or-path> <out> --dry-run` | Đếm trang + ước lượng chi phí, không gọi API |
 | `scan2ebook ocr <slug-or-path> <out> --limit 10` | OCR tối đa 10 trang đầu |

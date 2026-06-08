@@ -1,7 +1,7 @@
 """CLI entry point: `scan2ebook <subcommand>`.
 
 Subcommands:
-    init <slug> --from <dir>                # register a book, copy scans in
+    init <slug> --from <dir|book.pdf>       # register a book, copy scans / render PDF in
     all <slug>                              # Stage 1+2+3 (4 optional via --upload)
     ocr <input-dir> <output-dir>           # Stage 1 only
     post <ocr-dir> <book.md> --title ...    # Stage 2 only
@@ -36,6 +36,7 @@ EST_COST_PER_PAGE = pipeline.EST_COST_PER_PAGE
 IMAGE_PATTERNS = pipeline.IMAGE_PATTERNS
 _slugify = pipeline._slugify
 _import_images = pipeline._import_images
+_import_pdf = pipeline._import_pdf
 
 
 def _load_dotenv() -> None:
@@ -98,12 +99,13 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     if args.from_dir:
         src = args.from_dir.expanduser()
-        if not src.is_dir():
-            print(f"--from dir not found: {src}", file=sys.stderr)
+        is_pdf = src.is_file() and src.suffix.lower() in pipeline._PDF_SUFFIXES
+        if not src.is_dir() and not is_pdf:
+            print(f"--from không phải thư mục ảnh hay file PDF: {src}", file=sys.stderr)
             return 2
-        # Guard re-import: nếu scans/ đã có page_* thì copy mới sẽ để lại file thừa
-        # (vd cũ 3 page, import 2 → page_003 mồ côi) → OCR nhầm page rác, tốn tiền.
-        # Bắt user dọn trước thay vì âm thầm xoá/ghi đè.
+        # Guard re-import: nếu scans/ đã có page_* thì copy/render mới sẽ để lại file
+        # thừa (vd cũ 3 page, import 2 → page_003 mồ côi) → OCR nhầm page rác, tốn
+        # tiền. Bắt user dọn trước thay vì âm thầm xoá/ghi đè.
         existing = list(bp.scans_dir.glob("page_*"))
         if existing:
             print(
@@ -112,8 +114,12 @@ def cmd_init(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
-        n = _import_images(src, bp.scans_dir)
-        print(f"Imported {n} ảnh → scans/page_NNN.<ext>")
+        if is_pdf:
+            n = _import_pdf(src, bp.scans_dir)
+            print(f"Rendered {n} trang PDF → scans/page_NNN.jpg")
+        else:
+            n = _import_images(src, bp.scans_dir)
+            print(f"Imported {n} ảnh → scans/page_NNN.<ext>")
 
     meta_file = bp.scans_dir / "metadata.json"
     if meta_file.exists():
@@ -326,7 +332,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_init = sub.add_parser("init", help="Tạo skeleton book (<home>/<slug>/{scans,work,dist} + import ảnh + metadata mẫu)")
     p_init.add_argument("slug", help="tên sách (folder name), vd namphong-q01")
     p_init.add_argument("--home", type=Path, default=None, help="data-root chứa mọi sách (default $SCAN2EBOOK_HOME hoặc ~/scan2ebook)")
-    p_init.add_argument("--from", dest="from_dir", type=Path, default=None, help="copy ảnh từ thư mục này → scans/page_NNN")
+    p_init.add_argument("--from", dest="from_dir", type=Path, default=None, help="thư mục ảnh HOẶC file .pdf → render/copy vào scans/page_NNN")
     p_init.add_argument("--title", default=None, help="title cho metadata.json (default = slug)")
     p_init.add_argument("--author", default=None)
     p_init.add_argument("--lang", default="vi")

@@ -208,7 +208,7 @@ def ocr_page(
     api_key: str,
     model: str,
     image_path: Path,
-    retries: int = 2,
+    retries: int = 4,
     max_tokens: int = 12000,
     prompt_context: str = "",
 ) -> tuple[str, dict]:

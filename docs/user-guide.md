@@ -42,7 +42,7 @@ Pipeline **tự nạp `.env`** (tìm ở thư mục hiện tại rồi repo root
 
 Lệnh này kiểm tra Python >= 3.10, pandoc có cài, key OpenRouter present/absent, rclone optional. Exit code 0 nếu essential checks pass (python + pandoc + key). Chỉ essential mới blocking — rclone vắng chỉ warning (upload sẽ không chạy).
 
-Nếu chưa có credit OpenRouter, nạp $5–10 để start. Cost dao động $0.05/page A4 với Gemini 3.1 Pro Preview, một quyển 200 trang khoảng $10.
+Nếu chưa có credit OpenRouter, nạp $5–10 để start. Cost dao động ~$0.004/page A4 với Qwen 3.7-Plus (default), một quyển 200 trang khoảng $0.80.
 
 ## Cấu hình Drive (tùy chọn)
 
@@ -189,9 +189,9 @@ scan2ebook all namphong-q01 --smoke
 ```
 
 **Flow chi tiết:**
-1. OCR ≤10 trang đầu (~$0.50) → ghi vào `work/ocr/`
+1. OCR ≤10 trang đầu (~$0.04 với Qwen 3.7-Plus) → ghi vào `work/ocr/`
 2. Build mini epub `work/book.smoke.epub` từ 10 trang để preview
-3. Ước cost cho phần còn lại: `(số trang còn lại) × giá/trang đo thật từ smoke` (cost token-based của 10 trang smoke chia ra; chính xác hơn flat $0.05, fallback $0.05 nếu smoke 0 trang ok)
+3. Ước cost cho phần còn lại: `(số trang còn lại) × giá/trang đo thật từ smoke` (cost token-based của 10 trang smoke chia ra; chính xác hơn flat $0.004, fallback $0.004 nếu smoke 0 trang ok)
 4. **Interactive prompt**: `Full run ≈ $X.XX cho Y trang còn lại. Continue? [y/N]`
    - Gõ `y` hoặc `Y` → tiếp tục full pipeline (resume-safe, 10 trang đã OCR sẽ skip)
    - Gõ `n` hoặc Enter (default) → dừng, giữ smoke epub để review
@@ -199,7 +199,7 @@ scan2ebook all namphong-q01 --smoke
 **Kiểm tra smoke epub**: Mở `~/scan2ebook/namphong-q01/work/book.smoke.epub` trên Books.app để check chất lượng. Cần kiểm tra:
 
 - **Dấu tiếng Việt**: có đúng không (chữ ô, ấ, ầ, ậ, ẩ, ẫ, ơ, ờ, ớ, ợ). Nếu bị bỏ dấu hoặc đoán sai, OCR model gặp khó với scan → thử raise DPI scan hoặc đổi model qua `--model`.
-- **Chính tả cổ** (nếu sách cổ): có giữ nguyên không. "Văn-chương" có hyphen, "chánh" giữ nguyên (không sửa "chính"). Nếu modernize, model có bias — tránh Qwen3 VL, GLM 4.5V.
+- **Chính tả cổ** (nếu sách cổ): có giữ nguyên không. "Văn-chương" có hyphen, "chánh" giữ nguyên (không sửa "chính"). Qwen 3.7-Plus (default) giữ chính tả cũ tốt — verified trên Nam Phong 1917. Khi đổi sang model khác/rẻ hơn, verify lại "Văn-chương" và "chánh" không bị modernize.
 - **Layout 2 cột**: nối đúng không. Đọc 2-3 đoạn, xem có flow tự nhiên hay xen cột.
 - **Heading**: detect được không. Xem `# Chương` có promote trong epub.
 

@@ -2,7 +2,7 @@
 
 ## Cost management
 
-OpenRouter charge theo token in/out. Gemini 3.1 Pro Preview (5/2026) là $2.5/M input token và $10/M output token. Một trang A4 tiếng Việt bình quân 1421 input token (prompt + ảnh base64) và 4000–6000 output token (markdown trang). Cost trung bình $0.05/trang.
+OpenRouter charge theo token in/out. Qwen 3.7-Plus (default, 6/2026) là $0.40/M input token và $1.60/M output token. Một trang A4 tiếng Việt bình quân 1421 input token (prompt + ảnh base64) và 4000–6000 output token (markdown trang). Cost trung bình ~$0.004/trang với Qwen. Gemini 3.1 Pro (cao hơn 15×) là $2.5/M in, $10/M out (~$0.05/trang).
 
 Cost per book ước tính theo số trang. Sách 100 trang khoảng $5, 200 trang $10, 500 trang $25. Tăng đột biến (output token gấp 2–3) gặp ở trang nhiều text dày, footnote nhiều, hoặc trang chứa table phức tạp.
 
@@ -10,7 +10,7 @@ Pipeline in cost ước tính cuối stage 1, dòng cuối log. Số này không
 
 Để giảm cost, có thể.
 
-Dùng model rẻ hơn cho sách hiện đại layout đơn giản. `--model openai/gpt-4o-mini` cost ~$0.01/page nhưng dấu Việt thường kém hơn — verify trước. Sách cổ phức tạp vẫn nên dùng Gemini 3.1 Pro.
+Qwen 3.7-Plus (default) là lựa chọn rẻ nhất. Nếu muốn thử cheaper hơn nữa, `--model openai/gpt-4o-mini` cost ~$0.01/page nhưng chất lượng dấu Việt yếu hơn — verify trước. Sách cổ hiếm nay dùng Qwen 3.7-Plus (verified trên Nam Phong 1917: giữ nguyên chính tả cũ như "văn-chương", "nhời").
 
 Giảm `--workers` xuống 2 hoặc 1 nếu OpenRouter rate limit hit gây retry tốn cost. Mặc định 4 đủ cho paid tier.
 
@@ -92,33 +92,27 @@ Throttle upload nếu băng thông yếu (rclone default unlimited). Set qua fla
 
 ## Model swap
 
-Default model `google/gemini-3.1-pro-preview` ổn nhất hiện tại cho corpus Việt. Khi cần override, có 2 cách.
+Default model `qwen/qwen3.7-plus` (6/2026) là tối ưu nhất cho corpus Việt: rẻ ($0.004/page), nhanh, giữ chính tả cũ tốt. Khi cần override, có 2 cách.
 
 Override per-run qua CLI flag.
 
 ```bash
-scan2ebook ocr <inbox> <out> --model anthropic/claude-opus-4
+scan2ebook ocr <inbox> <out> --model google/gemini-3.1-pro-preview
 ```
 
-Override permanent qua env (chưa support trong code hiện tại, cần patch nhỏ trong `ocr.py` nếu muốn).
+Override qua env: đặt `OCR_MODEL=<id>` (cả `ocr` lẫn `all` đọc env này làm default cho `--model`).
 
-Danh sách model đã test trên corpus Nam Phong 1917 (5 trang spike Phase 0).
+Danh sách model đã test trên corpus Nam Phong 1917 (20 trang, 6/2026 benchmark).
 
-`google/gemini-3.1-pro-preview` — zero error, $0.05/page. Default, recommended.
+`qwen/qwen3.7-plus` — zero fail, $0.004/page (~0.004–0.0038 old-text). Default, recommended. Giữ nguyên chính tả cũ (chánh, nhời, văn-chương).
 
-`google/gemini-2.5-pro` — minor error, $0.03/page. Backup khi Gemini 3.1 down.
+`google/gemini-3.1-pro-preview` — quality tương đương Qwen nhưng gặp vấn đề trang dày (blank page, token spiral). ~15× đắt ($0.05/page). Backup nếu Qwen fail trang cụ thể.
 
-`anthropic/claude-opus-4` — zero error, $0.20/page. Đắt 4x, dùng khi sách cực khó (corrupt scan, calligraphy).
+`anthropic/claude-opus-4` — không nằm trong benchmark này; rất đắt, chỉ cân nhắc khi sách cực khó (corrupt scan, calligraphy) và verify trước.
 
-`anthropic/claude-sonnet-4` — minor error, $0.05/page. Tương đương Gemini 3.1 cost nhưng error rate cao hơn nhẹ.
+`z-ai/glm-4.6v` — drops italic, slow (~489s/20pg old-text), fail 3 page (token budget overflow). Không recommend.
 
-`openai/gpt-4o` — moderate error, $0.04/page. Bỏ dấu thỉnh thoảng. Không recommended cho Việt.
-
-`openai/gpt-4o-mini` — many errors, $0.01/page. Rẻ nhưng không acceptable cho Việt cổ. OK cho sách hiện đại nếu accept lỗi.
-
-`qwen/qwen3-vl-72b` — heavy modernize bias. Tự sửa "chánh" thành "chính", drop hyphen từ ghép. Không dùng cho Việt cổ.
-
-`zhipu/glm-4.5v` — heavy modernize bias. Tương tự Qwen.
+`baidu/ernie-4.5-vl-424b-a47b` — weakest, hallucinate text trên trang trắng, most error. Tránh.
 
 Khi đổi model, smoke test 10 trang trước khi commit full pipeline. Output style mỗi model khác — Claude verbose hơn, GPT terse hơn, có thể cần chỉnh prompt nếu chuyển hẳn.
 
@@ -189,7 +183,7 @@ Recommended: rclone sync entire scan2ebook folder lên Drive định kỳ. Scans
 rclone sync ~/scan2ebook/ gdrive:Backup/scan-to-ebook-books/ --progress
 ```
 
-Scans PNG có thể backup bằng Time Machine (macOS) hoặc rclone tương tự. Work zone (cache + OCR temp) không cần backup — có thể xoá `rm -rf work/` bất kỳ lúc nào, chỉ tốn cost lại prepass (~$0.09).
+Scans PNG có thể backup bằng Time Machine (macOS) hoặc rclone tương tự. Work zone (cache + OCR temp) không cần backup — có thể xoá `rm -rf work/` bất kỳ lúc nào, chỉ tốn cost lại prepass (~$0.01 với Qwen 3.7-Plus, scales với model price).
 
 Loại trừ `.env` khỏi backup public.
 

@@ -23,8 +23,9 @@ from typing import NamedTuple
 
 from . import context_prepass, drive_upload, epub_build, image_ops, json_output, ocr, pdf_render, post_process
 
-# Giá ước lượng Gemini 3.1 Pro Preview ~$0.05/page (đo ở Phase 0, 1 ảnh A4).
-EST_COST_PER_PAGE = 0.05
+# Giá ước lượng qwen3.7-plus ~$0.004/page (đo benchmark 2026-06-08, 1 ảnh A4).
+# CHỈ là fallback trước smoke; sau smoke, per_page token-based đo thật sẽ override.
+EST_COST_PER_PAGE = 0.004
 
 # Multi-ext glob cho OCR stage (`all`): chỉ png/jpg/jpeg — định dạng vision API +
 # pandoc đọc trực tiếp. Sau khi import, mọi ảnh ĐÃ là jpg/png nên đây là đủ.

@@ -4,7 +4,13 @@
 
 Pipeline chia thành 5 stage tuần tự, mỗi stage là một module Python độc lập trong `src/scan_to_ebook/`. Mỗi stage đọc filesystem state của stage trước và ghi output xuống filesystem cho stage sau. Không có in-memory queue, không có database, không có process daemon.
 
-**Import (prep stage)**: Lệnh `init --from` tự động xử lý định dạng input. Nếu `--from` là thư mục ảnh, copy + rename thành `page_NNN.<ext>`. Nếu `--from` là file PDF, gọi `pdf_render.py` (module mới) để render từng trang PDF thành JPG qua backend-chain (pdftoppm poppler → magick ImageMagick+Ghostscript → sips macOS), sau đó rename thành `page_NNN.jpg`. HEIC/HEIF ảnh tự convert→JPG. Kết quả: `scans/` chỉ chứa `page_NNN.jpg/png`, sẵn sàng cho OCR — không file PDF hay HEIC thô nào được truyền qua stage 1+. **PDF render strategy**: Luôn render→OCR (không trích text layer) vì PDF born-digital (Calibre, Quartz) thường có ToUnicode CMap hỏng → pdftotext yield ký tự rác. Render→OCR xử lý được CẢ PDF scan lẫn PDF text-layer-broken nhất quán.
+**Import (prep stage)**: Lệnh `init --from` tự động xử lý ba loại input:
+- **Thư mục ảnh** → copy + rename thành `page_NNN.<ext>`.
+- **File PDF local** → gọi `pdf_render.py` để render từng trang thành JPG qua backend-chain (pdftoppm → magick → sips).
+- **Google Drive file link** → gọi `drive_download.py` để tải PDF temp, validate magic bytes `%PDF`, xử lý interstitial confirm-token tự động, sau đó render như PDF local.
+- **HEIC/HEIF** → tự convert→JPG.
+
+Kết quả: `scans/` chỉ chứa `page_NNN.jpg/png`, sẵn sàng cho OCR — không file PDF/HEIC thô nào được truyền qua stage 1+. **PDF render strategy**: Luôn render→OCR (không trích text layer) vì PDF born-digital thường có ToUnicode CMap hỏng. Render→OCR xử lý nhất quán cả PDF scan lẫn text-layer-broken. **Drive link validation**: Phải public, FILE link (không folder), bắt buộc validate PDF content.
 
 **Stage 0: Context Pre-Pass** (mới). Trước khi OCR từng trang, pipeline gọi `context_prepass.py` để trích bối cảnh sách từ 15 sample ảnh (7 trang đầu + 4 giữa + 4 cuối, natural-sort). Một multi-image call duy nhất tới OpenRouter để detect title, author, translator, publisher, year, `pages_per_image` (LLM tự phát hiện xem ảnh có 1 hay 2 trang), mục lục, tên riêng + chính tả chuẩn, thuật ngữ, layout, footnote convention, OCR pitfalls. Kết quả persist vào `work/context.json` (source-of-truth, hand-editable) + `work/context.md` (mirror render, có note "edit .json thay vì file này). Read sample từ `scans/`, write cache vào `work/` — giữ `scans/` nguyên vẹn, clean-room resume = `rm -rf work/`. Prepass **cache-aware**: nếu `work/context.json` đã tồn tại hợp lệ → skip API, cost 0, re-derive block từ JSON. Prepass **abort-on-fail**: API error hay JSON parse fail → emit `context_fail` event + abort pipeline (exit != 0, không tiêu OCR cost). Mẫu ảnh downscale ~1200px (cross-platform: sips macOS → magick ImageMagick → heif-convert → pillow-heif, first available) để tránh HTTP 413; ảnh gốc full-res giữ nguyên cho OCR thực. Spread guidance ("ẢNH TRANG ĐÔI") được render vào block CHỈ khi `pages_per_image >= 2` (conditional per-book, không hardcode base PROMPT). Smoke + full share một prepass (cost counted once, full = cache hit). **Cover/colophon rule**: Block luôn cấm OCR dùng `## `/`### ` heading cho trang bìa/tựa đề (đầu) và trang thông tin xuất bản/colophon (cuối: tên sách, tác giả, NXB, giấy phép, giá bán) — để dạng đoạn thường tránh pandoc `--toc` nhặt chữ trang trí vào mục lục.
 
@@ -69,6 +75,7 @@ scan-to-ebook/
     ├── pipeline.py        # Orchestration + shared helpers (import, metadata, path resolve)
     ├── pdf_render.py      # PDF → page-image render (pdftoppm/magick/sips backend-chain)
     ├── image_ops.py       # HEIC→JPG cross-platform convert + downscale
+    ├── drive_download.py  # Google Drive file link → temp PDF (stdlib urllib, public link only)
     ├── context_prepass.py # Stage 0
     ├── ocr.py             # Stage 1
     ├── post_process.py    # Stage 2

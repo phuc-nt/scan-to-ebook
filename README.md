@@ -14,8 +14,8 @@
   <img alt="Runtime: stdlib only" src="https://img.shields.io/badge/runtime-stdlib--only-success.svg">
 </p>
 
-scan-to-ebook converts photos or scans of a paper book (PNG / JPG / HEIC / HEIF)
-— or a PDF of the book — into an EPUB you can read in Books.app or on a Kindle.
+scan-to-ebook converts photos or scans of a paper book (PNG / JPG / HEIC / HEIF),
+a PDF file, or a Google Drive file link — into an EPUB you can read in Books.app or on a Kindle.
 It runs each page through an OpenRouter vision model for OCR, cleans and merges the
 text with the Python standard library, and builds the EPUB with pandoc.
 
@@ -42,11 +42,12 @@ output before running your own book.
   feeds that back into every page's prompt for consistent results. Also prevents cover
   and back-matter decoration (title, publisher, price) from being marked as headings
   and appearing in the table of contents.
-- **Image or PDF input** — point it at a folder of page images or at a single PDF
-  of the book; PDFs are rendered to per-page JPGs at import (`pdftoppm` → `magick`
-  → `sips`, whichever is available). Works on both scanned PDFs and born-digital PDFs
-  whose text layer is broken — it OCRs the rendered pages, never the garbled text,
-  giving consistent results for both.
+- **Image, PDF, or Google Drive file input** — point it at a folder of page images,
+  a local PDF file, or a publicly-shared Google Drive file link. PDFs are rendered
+  to per-page JPGs at import (`pdftoppm` → `magick` → `sips`, whichever is available).
+  Works on both scanned PDFs and born-digital PDFs whose text layer is broken — it
+  OCRs the rendered pages, never the garbled text, giving consistent results for both.
+  Google Drive file links are automatically downloaded and processed the same way.
 - **Cross-platform HEIC/HEIF** — iPhone photos are auto-converted to JPG at import,
   trying `sips` (macOS) → ImageMagick `magick` → `heif-convert` → `pillow-heif`,
   whichever is available.
@@ -95,8 +96,10 @@ cp .env.example .env && $EDITOR .env   # set OPENROUTER_API_KEY=...
 # 4. Check everything is ready (python / pandoc / key / HEIC backend)
 .venv/bin/scan2ebook doctor
 
-# 5. Register a book and run it (--from takes an image folder OR a single .pdf)
-.venv/bin/scan2ebook init my-book --from ~/path/to/scanned-images   # or: --from ~/path/to/book.pdf
+# 5. Register a book and run it (--from takes an image folder, .pdf, OR a Google Drive file link)
+.venv/bin/scan2ebook init my-book --from ~/path/to/scanned-images    # image folder
+.venv/bin/scan2ebook init my-book --from ~/path/to/book.pdf          # or: local PDF file
+.venv/bin/scan2ebook init my-book --from "https://drive.google.com/file/d/1RAG...nOA/view?usp=drivesdk"  # or: Google Drive file link
 .venv/bin/scan2ebook all my-book --smoke
 ```
 

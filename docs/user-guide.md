@@ -92,7 +92,7 @@ ls *.png | nl | while read n f; do
 done
 ```
 
-Pipeline nhận cả **PNG, JPG/JPEG, HEIC, HEIF, PDF**. Ảnh được xử lý bằng cách chuyển đổi HEIC/HEIF qua chain backend (sips macOS → magick ImageMagick → heif-convert → pillow-heif, first available). File PDF được render từng trang thành JPG qua backend-chain: pdftoppm (poppler) → magick (ImageMagick + Ghostscript) → sips (macOS, single-page fallback). Cross-platform: Windows/macOS/Linux tất cả supported. Nếu NO backend available (HEIC/PDF), raise error (mất trang = sách hỏng, never skip silent). Lệnh `doctor` hiển thị backend nào có sẵn (warning only nếu thiếu).
+Pipeline nhận cả **PNG, JPG/JPEG, HEIC, HEIF, PDF**. Ảnh được xử lý bằng cách chuyển đổi HEIC/HEIF qua chain backend (sips macOS → magick ImageMagick → heif-convert → pillow-heif, first available). File PDF được render từng trang thành JPG qua backend-chain: pdftoppm (poppler) → magick (ImageMagick + Ghostscript) → sips (macOS, single-page fallback). **PDF render strategy**: Luôn render→OCR (không trích text layer), vì PDF born-digital (Calibre, Quartz) thường có ToUnicode CMap hỏng → pdftotext yield ký tự rác, trong khi ảnh render qua vision model OCR sạch. Xử lý nhất quán cả PDF scan lẫn PDF text-layer-broken. Cross-platform: Windows/macOS/Linux tất cả supported. Nếu NO backend available (HEIC/PDF), raise error (mất trang = sách hỏng, never skip silent). Lệnh `doctor` check backend: HEIC convert (non-essential, warning only nếu thiếu — chỉ cần khi input HEIC), PDF render (non-essential, warning only nếu thiếu — chỉ cần khi input PDF).
 
 DPI tối thiểu khuyến nghị là 300 DPI cho text rõ ràng. Vision model tolerate được DPI thấp hơn nhưng dấu Việt có thể đoán sai.
 
@@ -153,6 +153,8 @@ Trước khi OCR từng trang, pipeline tự động trích bối cảnh sách (
 - Render đã format của `context.json`, dùng để xem nhanh bên ngoài editor
 - Header comment: "edit context.json to change" — file này tự động generate từ JSON
 - Chỉnh sửa `context.md` đơn lẻ **sẽ bị bỏ qua** (JSON là authoritative), chỉnh sửa không có tác dụng
+
+**Cover/colophon rule**: Context block luôn chứa quy tắc cố định: trang bìa/tựa đề (đầu sách) và trang thông tin xuất bản/colophon (cuối sách: tên sách, tác giả, dịch giả, NXB, giấy phép, giá bán) phải để dạng đoạn thường, TUYỆT ĐỐI KHÔNG dùng `## `/`### ` heading. Quy tắc này áp mọi sách tự động, không phụ thuộc trường nào trong context.json — mục đích tránh pandoc `--toc` nhặt chữ trang trí vào mục lục.
 
 **Ví dụ**: sách dịch từ Pháp, OCR detect đúng translator nhưng sai tên riêng. Mở `~/scan2ebook/namphong-q01/work/context.json`, tìm `"proper_names"` array, sửa "Miraben" → "Miraudy" (canonical), save. Chạy lại `scan2ebook all namphong-q01`, pipeline sẽ dùng context cache này (cost 0) và OCR toàn bộ với tên đúng.
 

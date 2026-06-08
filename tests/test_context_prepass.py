@@ -195,6 +195,17 @@ def test_render_block_caps_proper_names():
     assert name_line.count("→") == 40
 
 
+def test_render_block_cover_guidance_always_present():
+    """Hướng dẫn cấm heading trang bìa/tựa (đầu) + colophon (cuối) LUÔN có (mọi sách)
+    → pandoc --toc không nhặt chữ trang trí vào mục lục. Không phụ thuộc field nào
+    trong context.json."""
+    for ctx in (_valid_ctx(), {"title": "X"}, {}):
+        block = context_prepass.render_block(ctx)
+        assert "TRANG BÌA/TỰA ĐỀ" in block
+        assert "COLOPHON" in block  # bao cả trang xuất bản cuối sách
+        assert "KHÔNG dùng `## `" in block
+
+
 def test_render_block_spread_when_2():
     block = context_prepass.render_block(_valid_ctx(pages_per_image=2))
     assert "ẢNH TRANG ĐÔI" in block

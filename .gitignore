@@ -20,7 +20,7 @@ tests/output*/
 .claude/
 plans/
 CLAUDE.md
-AGENTS.md
+/AGENTS.md
 
 # Python
 __pycache__/

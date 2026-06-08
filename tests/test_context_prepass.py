@@ -243,6 +243,44 @@ def test_render_block_cover_guidance_always_present():
         assert "KHÔNG dùng `## `" in block
 
 
+def test_render_block_heading_consistency_always_present():
+    """Rule cấp-heading nhất quán (cả tựa gốc + tựa dịch = `## `) LUÔN có mọi sách →
+    --toc-depth=2 nhặt đủ cả hai, tránh tựa dịch lỡ `### ` rớt TOC (bug La Fontaine)."""
+    for ctx in (_valid_ctx(), {"title": "X"}, {}):
+        block = context_prepass.render_block(ctx)
+        assert "CẤP HEADING NHẤT QUÁN" in block
+        assert "SONG NGỮ" in block
+        assert "rớt TOC" in block
+
+
+def test_render_block_verse_break_when_verse():
+    ctx = _valid_ctx()
+    ctx["content_type"] = "verse"
+    block = context_prepass.render_block(ctx)
+    assert "THƠ (xuống dòng từng câu)" in block
+    assert "HAI DẤU CÁCH" in block
+
+
+def test_render_block_verse_break_when_mixed():
+    ctx = _valid_ctx()
+    ctx["content_type"] = "mixed"
+    assert "THƠ (xuống dòng từng câu)" in context_prepass.render_block(ctx)
+
+
+def test_render_block_no_verse_break_when_prose():
+    ctx = _valid_ctx()
+    ctx["content_type"] = "prose"
+    assert "THƠ (xuống dòng từng câu)" not in context_prepass.render_block(ctx)
+
+
+def test_render_block_no_verse_break_when_missing():
+    """content_type vắng (sách cũ / không detect) → không ép xuống dòng thơ (an toàn
+    cho văn xuôi)."""
+    ctx = _valid_ctx()
+    ctx.pop("content_type", None)
+    assert "THƠ (xuống dòng từng câu)" not in context_prepass.render_block(ctx)
+
+
 def test_render_block_spread_when_2():
     block = context_prepass.render_block(_valid_ctx(pages_per_image=2))
     assert "ẢNH TRANG ĐÔI" in block

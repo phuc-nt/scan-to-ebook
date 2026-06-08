@@ -107,7 +107,7 @@ Thư mục scans hoàn chỉnh trông như sau (ở `~/scan2ebook/<slug>/scans/`
 ├── ...
 ├── page_075.png
 ├── metadata.json
-└── cover.jpg (optional)
+└── cover.jpg (optional; manual override)
 ```
 
 `metadata.json` không bắt buộc nhưng nên có với sách dài. Pipeline dùng metadata này làm title epub, author, language tag cho thiết bị đọc.
@@ -121,7 +121,14 @@ Thư mục scans hoàn chỉnh trông như sau (ở `~/scan2ebook/<slug>/scans/`
 }
 ```
 
-`cover.jpg` optional trong `scans/`. Nếu có, pandoc tự embed thành bìa epub. Ảnh đẹp nhất là 1600x2400 portrait, nhưng pandoc accept mọi kích thước.
+**Cover (bìa EPUB)**: Pipeline tự động phát hiện trang bìa màu từ stage 0 (pre-pass). Thứ tự ưu tiên:
+  1. **`scans/cover.jpg`** (nếu bạn tự đặt) — luôn thắng, override rõ ràng. Ảnh đẹp nhất là 1600x2400 portrait, nhưng pandoc accept mọi kích thước.
+  2. **Auto-detect từ `context.json`** (pre-pass) — nếu lần đầu chạy, LLM tự dò ảnh bìa màu (ví dụ `page_001.jpg`) rồi lưu vào `cover_page` trong `work/context.json`. Lần chạy lại, cover được dùng cache này (cost 0).
+  3. **Không có cover** — nếu sách scan toàn trắng đen, hoặc pre-pass không phát hiện được (context.json không có `cover_page` hoặc giá trị null), EPUB build mà không cover (đặc biệt phổ biến với tạp chí/journal cũ).
+
+Bìa tự động + body text ở cùng một EPUB: trang bìa (nếu được auto-detect) vẫn được OCR vào thân sách dạng đoạn văn bình thường (không dùng heading tránh lọt TOC). Chỉ ảnh bìa được embed qua pandoc `--epub-cover-image` — text bìa/colophon ở body.
+
+**Cấp độ cache & resume**: Nếu sách cũ (chạy TRƯỚC khi feature này được thêm) có `context.json` mà không `cover_page` field, resume sẽ KHÔNG có cover. Để lấy cover, xóa `work/context.json` (bắt lại pre-pass, cost ~$0.07) rồi chạy lại. OCR cache không bị mất, chỉ context tái tạo.
 
 ## Tạo inbox nhanh
 
@@ -156,13 +163,13 @@ Bỏ `--from` nếu muốn tự copy ảnh sau (lệnh chỉ tạo folder + meta
 
 ## Bối cảnh sách (context.json)
 
-Trước khi OCR từng trang, pipeline tự động trích bối cảnh sách (title, author, translator, pages_per_image, table_of_contents, proper names, terminology, layout notes) từ 15 sample ảnh. Kết quả lưu thành `context.json` và `context.md` trong thư mục `work/`.
+Trước khi OCR từng trang, pipeline tự động trích bối cảnh sách (title, author, translator, pages_per_image, table_of_contents, proper names, terminology, layout notes, **cover_page**) từ 15 sample ảnh. Kết quả lưu thành `context.json` và `context.md` trong thư mục `work/`.
 
 **context.json** (source-of-truth, hand-editable)
-- Tệp JSON cấu trúc chứa metadata sách và OCR guidance
-- **Hand-editable**: nếu phát hiện lỗi (ví dụ `pages_per_image` detect sai 1 thay vì 2), edit trực tiếp JSON và re-run (cache hit, cost 0)
-- Khi resume (chạy lại sách cũ), pipeline kiểm tra `work/context.json` tồn tại → skip API, re-derive guidance từ JSON
-- Thay đổi tay: sửa `pages_per_image`, tên riêng, hay tên sách trong JSON → chạy lại sẽ sử dụng giá trị mới
+- Tệp JSON cấu trúc chứa metadata sách, OCR guidance, và cover_page
+- **Hand-editable**: nếu phát hiện lỗi (ví dụ `pages_per_image` detect sai 1 thay vì 2, hoặc `cover_page` sai), edit trực tiếp JSON và re-run (cache hit, cost 0)
+- Khi resume (chạy lại sách cũ), pipeline kiểm tra `work/context.json` tồn tại → skip API, re-derive guidance từ JSON (bao gồm cover)
+- Thay đổi tay: sửa `pages_per_image`, tên riêng, hay `cover_page` trong JSON → chạy lại sẽ sử dụng giá trị mới
 
 **context.md** (mirror, chỉ đọc)
 - Render đã format của `context.json`, dùng để xem nhanh bên ngoài editor
@@ -348,8 +355,8 @@ scan2ebook ocr ~/Books-inbox/namphong-q01 ~/output/ocr --json-lines > events.ndj
 | `scan2ebook ocr <slug-or-path> <out> --model <id>` | Đổi vision model (hoặc đặt env `OCR_MODEL`) |
 | `scan2ebook ocr <slug-or-path> <out> --json` | JSON summary output |
 | `scan2ebook post <ocr-dir> <book.md> --title "..."` | Stage 2: merge → book.md |
-| `scan2ebook epub <book.md> <book.epub>` | Stage 3: build epub |
-| `scan2ebook epub <book.md> <book.epub> --cover cover.jpg` | Embed cover |
+| `scan2ebook epub <book.md> <book.epub>` | Stage 3: build epub (cover từ auto-detect hoặc cover.jpg) |
+| `scan2ebook epub <book.md> <book.epub> --cover <path>` | Override cover (one-off, không lưu vào context) |
 | `scan2ebook upload <book.epub>` | Stage 4: rclone → Drive |
 | `scan2ebook upload <book.epub> --rename "..."` | Rename khi upload |
 | `scan2ebook all <slug>` | 3 stage chain (slug-or-path) |

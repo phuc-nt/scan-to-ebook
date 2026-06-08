@@ -27,9 +27,9 @@ Pipeline làm 4 việc theo thứ tự cố định.
 2. **File PDF** — local file (từ Calibre, app scanner, v.v.) hoặc tải từ Google Drive link công khai.
 3. **Google Drive file link** — file PDF shared công khai; pipeline tải và xử lý như PDF local.
 
-PDF bất kỳ (scan hay born-digital) render từng trang thành JPG qua backend-chain (pdftoppm/magick/sips, first available). **Strategy PDF**: Luôn render→OCR, không trích text layer, vì PDF born-digital thường có ToUnicode CMap hỏng → pdftotext yield ký tự rác. HEIC/HEIF (mặc định iPhone) tự động convert→JPG tại stage import (`init --from`). Google Drive file phải công khai ("Bất kỳ ai có link"); file private/folder link fail với thông báo rõ. Do đó OCR stage cuối cùng chỉ nhận JPG/PNG. `scans/` có thể có thêm `metadata.json` và `cover.jpg` optional.
+PDF bất kỳ (scan hay born-digital) render từng trang thành JPG qua backend-chain (pdftoppm/magick/sips, first available). **Strategy PDF**: Luôn render→OCR, không trích text layer, vì PDF born-digital thường có ToUnicode CMap hỏng → pdftotext yield ký tự rác. HEIC/HEIF (mặc định iPhone) tự động convert→JPG tại stage import (`init --from`). Google Drive file phải công khai ("Bất kỳ ai có link"); file private/folder link fail với thông báo rõ. Do đó OCR stage cuối cùng chỉ nhận JPG/PNG. `scans/` có thể có thêm `metadata.json` và `cover.jpg` (tùy chọn; manual override).
 
-Đầu ra là một file `.epub` cùng các file `.md` trung gian (per-page và book-level) để người dùng có thể chỉnh sửa thủ công nếu cần trước khi build epub lại.
+Đầu ra là một file `.epub` (tự động include cover nếu detect được hoặc user đặt manual) cùng các file `.md` trung gian (per-page và book-level) để người dùng có thể chỉnh sửa thủ công nếu cần trước khi build epub lại.
 
 Stage giữa là parallel OCR (4 worker default) với resumable state lưu trên filesystem — page nào đã có `.md` non-empty thì skip khi rerun.
 

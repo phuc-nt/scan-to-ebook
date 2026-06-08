@@ -38,10 +38,11 @@ output before running your own book.
 - **Pure-stdlib runtime** — no third-party Python packages to install. pandoc and
   rclone are the only external tools, and only pandoc is required.
 - **Book-aware OCR** — a context pre-pass reads a handful of sample pages first to
-  detect the title, proper names, spelling conventions, and two-page spreads, then
-  feeds that back into every page's prompt for consistent results. Also prevents cover
-  and back-matter decoration (title, publisher, price) from being marked as headings
-  and appearing in the table of contents.
+  detect the title, proper names, spelling conventions, two-page spreads, **and the
+  color cover page** (auto-embedded in EPUB), then feeds that back into every page's
+  prompt for consistent results. Also prevents cover and back-matter decoration
+  (title, publisher, price) from being marked as headings and appearing in the
+  table of contents.
 - **Image, PDF, or Google Drive file input** — point it at a folder of page images,
   a local PDF file, or a publicly-shared Google Drive file link. PDFs are rendered
   to per-page JPGs at import (`pdftoppm` → `magick` → `sips`, whichever is available).
@@ -73,9 +74,9 @@ Each book lives under a single data-root with three zones:
 
 | Zone | Holds | Lifecycle |
 | --- | --- | --- |
-| `scans/` | source images + optional `metadata.json`, `cover.jpg` | never auto-deleted |
-| `work/` | context, per-page OCR text, merged `book.md` | safe to `rm -rf` (rebuilds from scans) |
-| `dist/` | the final `<slug>.epub` | the deliverable |
+| `scans/` | source images + optional `metadata.json`, `cover.jpg` (manual override) | never auto-deleted |
+| `work/` | context (incl. auto-detected `cover_page`), per-page OCR, merged `book.md` | safe to `rm -rf` (rebuilds from scans) |
+| `dist/` | the final `<slug>.epub` (with auto-detected or manual cover) | the deliverable |
 
 The default location is `~/scan2ebook/<slug>/`; override with `--home` or
 `$SCAN2EBOOK_HOME`. Default OCR model is `google/gemini-3.1-pro-preview`.

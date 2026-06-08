@@ -413,7 +413,7 @@ def run_prepass(
     usage = meta.get("usage", {})
     tokens_in = usage.get("prompt_tokens", 0)
     tokens_out = usage.get("completion_tokens", 0)
-    cost = tokens_in / 1e6 * 2.5 + tokens_out / 1e6 * 10.0
+    cost = ocr.estimate_cost(model, tokens_in, tokens_out)
     return {
         "context": ctx,
         "block": block,

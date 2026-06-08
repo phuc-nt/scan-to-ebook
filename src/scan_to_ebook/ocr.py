@@ -1,8 +1,9 @@
 """OCR stage: scanned page image → markdown via OpenRouter vision model.
 
 Parallel ThreadPoolExecutor, resumable (skip pages có .md non-empty), retry trên
-transient HTTP error. Default model `google/gemini-3.1-pro-preview` — winner
-Phase 0 spike trên corpus Việt cổ (Nam Phong 1917, 0 lỗi, ~$0.05/page).
+transient HTTP error. Default model `qwen/qwen3.7-plus` — winner benchmark
+2026-06-08 trên CẢ sách hiện đại lẫn văn bản cổ (Nam Phong 1917): chất lượng chữ
+sòng phẳng Gemini, 0 fail (Gemini blank/cắt vài trang dày), rẻ hơn ~14-15×.
 
 Prompt được verify trên Nam Phong 1917. KHÔNG sửa prompt mà không re-test full
 batch — đổi 1 dòng có thể regress chính tả cổ ("văn-chương" → "văn chương").
@@ -21,7 +22,21 @@ from pathlib import Path
 from urllib import error as urlerr, request as urlreq
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "google/gemini-3.1-pro-preview"
+DEFAULT_MODEL = "qwen/qwen3.7-plus"
+
+# Giá OpenRouter ($/M token in, out) — verify live 2026-06-08. Dùng để ước tính
+# cost; nếu model không có trong bảng, fallback giá DEFAULT_MODEL. Provider đổi
+# giá thì cập nhật ở đây (1 chỗ duy nhất, cả ocr lẫn context_prepass dùng chung).
+MODEL_PRICES: dict[str, tuple[float, float]] = {
+    "qwen/qwen3.7-plus": (0.40, 1.60),
+    "google/gemini-3.1-pro-preview": (2.5, 10.0),
+}
+
+
+def estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
+    """Ước tính cost USD theo bảng giá; fallback giá DEFAULT_MODEL nếu model lạ."""
+    price_in, price_out = MODEL_PRICES.get(model, MODEL_PRICES[DEFAULT_MODEL])
+    return tokens_in / 1e6 * price_in + tokens_out / 1e6 * price_out
 
 # Placeholder ghi cho trang trống thật (giấy trắng/divider).
 BLANK_PLACEHOLDER = "<!-- blank page -->"
@@ -352,9 +367,8 @@ def run_batch(
                     },
                 )
 
-    # Cost estimate Gemini 3.1 Pro Preview: $2.5/M in, $10/M out (OpenRouter, May 2026).
-    # Tune lại nếu provider đổi giá. Phase 0 đo ~$0.05/page với 1 ảnh A4.
-    est_cost = total_in / 1e6 * 2.5 + total_out / 1e6 * 10.0
+    # Cost estimate theo bảng giá MODEL_PRICES (qwen3.7-plus mặc định ~$0.004/page).
+    est_cost = estimate_cost(model, total_in, total_out)
     summary = {
         "ok": ok_count,
         "fail": fail_count,

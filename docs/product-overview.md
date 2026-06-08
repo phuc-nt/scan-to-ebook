@@ -22,7 +22,12 @@ Chi phí thực tế khoảng $0.05/trang A4 cho Gemini 3.1 Pro, tức $10 cho s
 
 Pipeline làm 4 việc theo thứ tự cố định.
 
-Đầu vào là một thư mục chứa ảnh PNG, JPG, HEIC hoặc HEIF, mỗi ảnh là một trang sách đã được người dùng tự chụp bằng app scan trên smartphone (vFlat, Adobe Scan, ScannerPro) hoặc scanner phẳng. Hoặc đầu vào có thể là một file PDF của sách (ví dụ từ Calibre hoặc app scanner PDF) — PDF bất kỳ (scan hoặc born-digital) được render từng trang thành JPG qua backend-chain (pdftoppm/magick/sips, first available). **Strategy PDF**: Luôn render→OCR, không trích text layer, vì PDF born-digital thường có ToUnicode CMap hỏng → pdftotext yield ký tự rác, trong khi ảnh render qua vision model OCR sạch nhất. HEIC/HEIF (định dạng mặc định iPhone) tự động convert→JPG tại stage import (`init --from`). Do đó OCR stage chỉ nhận JPG/PNG. `scans/` có thể có thêm `metadata.json` và `cover.jpg` optional.
+Đầu vào là một trong ba loại:
+1. **Thư mục ảnh** — PNG, JPG, HEIC hoặc HEIF, mỗi ảnh một trang (từ app scan vFlat, Adobe Scan, ScannerPro hoặc scanner phẳng).
+2. **File PDF** — local file (từ Calibre, app scanner, v.v.) hoặc tải từ Google Drive link công khai.
+3. **Google Drive file link** — file PDF shared công khai; pipeline tải và xử lý như PDF local.
+
+PDF bất kỳ (scan hay born-digital) render từng trang thành JPG qua backend-chain (pdftoppm/magick/sips, first available). **Strategy PDF**: Luôn render→OCR, không trích text layer, vì PDF born-digital thường có ToUnicode CMap hỏng → pdftotext yield ký tự rác. HEIC/HEIF (mặc định iPhone) tự động convert→JPG tại stage import (`init --from`). Google Drive file phải công khai ("Bất kỳ ai có link"); file private/folder link fail với thông báo rõ. Do đó OCR stage cuối cùng chỉ nhận JPG/PNG. `scans/` có thể có thêm `metadata.json` và `cover.jpg` optional.
 
 Đầu ra là một file `.epub` cùng các file `.md` trung gian (per-page và book-level) để người dùng có thể chỉnh sửa thủ công nếu cần trước khi build epub lại.
 

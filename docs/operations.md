@@ -12,7 +12,7 @@ Pipeline in cost ước tính cuối stage 1, dòng cuối log. Số này không
 
 Qwen 3.7-Plus (default) là lựa chọn rẻ nhất. Nếu muốn thử cheaper hơn nữa, `--model openai/gpt-4o-mini` cost ~$0.01/page nhưng chất lượng dấu Việt yếu hơn — verify trước. Sách cổ hiếm nay dùng Qwen 3.7-Plus (verified trên Nam Phong 1917: giữ nguyên chính tả cũ như "văn-chương", "nhời").
 
-Giảm `--workers` xuống 2 hoặc 1 nếu OpenRouter rate limit hit gây retry tốn cost. Mặc định 4 đủ cho paid tier.
+`--workers` mặc định 12 (parallel OCR), retry 4 lần backoff trên 429 — đủ saturate paid tier mà vẫn 0-fail trên sách lớn (verified: 331 trang, 12 worker, 0 fail). Trang text-dày thỉnh thoảng "stutter" — model lặp/lạc trong lúc sinh, nổ output token (vd 1 trang ra 12k–25k token, latency 200–450s) dù nội dung trang bình thường; với nhiều worker, trang nổ không khoá batch. Giảm `--workers` xuống 4–8 (hoặc thấp hơn) nếu OpenRouter rate-limit hit gây retry tốn cost; tăng cao hơn 12 chỉ khi key chịu được — quá ngưỡng rate-limit thì 429 làm chậm hơn cả tăng tốc.
 
 Crop ảnh PNG trước khi OCR. Giảm pixel = giảm token input. ImageMagick `mogrify -trim` cắt viền trắng tự động. Có thể tiết kiệm 10–20% input cost.
 

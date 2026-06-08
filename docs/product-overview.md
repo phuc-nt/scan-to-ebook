@@ -31,7 +31,7 @@ PDF bất kỳ (scan hay born-digital) render từng trang thành JPG qua backen
 
 Đầu ra là một file `.epub` (tự động include cover nếu detect được hoặc user đặt manual) cùng các file `.md` trung gian (per-page và book-level) để người dùng có thể chỉnh sửa thủ công nếu cần trước khi build epub lại.
 
-Stage giữa là parallel OCR (4 worker default) với resumable state lưu trên filesystem — page nào đã có `.md` non-empty thì skip khi rerun.
+Stage giữa là parallel OCR (12 worker default) với resumable state lưu trên filesystem — page nào đã có `.md` non-empty thì skip khi rerun.
 
 Sau khi build epub, người dùng có thể tự upload Drive qua lệnh CLI riêng (rclone) nếu muốn đồng bộ giữa nhiều thiết bị.
 

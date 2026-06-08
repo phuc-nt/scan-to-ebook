@@ -234,7 +234,7 @@ scan2ebook all namphong-q01 --home ~/custom-ebooks
 
 **Tiến trình**: Real-time console output: mỗi page báo `ok latency=X.Ys in=A out=B`, cuối stage 1 báo tổng cost. Stage 2 báo số page merged, char count, h1/h2 count. Stage 3 báo size epub.
 
-Wall-clock cho 200 trang, parallel 4 worker, khoảng 30–45 phút. Có thể chạy nền (background hoặc `nohup`), pipeline không cần tương tác.
+Wall-clock cho ~330 trang, parallel 12 worker (default), khoảng 25–30 phút (verified). Có thể chạy nền (background hoặc `nohup`), pipeline không cần tương tác.
 
 Sau khi xong, mở epub trên Mac.
 
@@ -350,7 +350,7 @@ scan2ebook ocr ~/Books-inbox/namphong-q01 ~/output/ocr --json-lines > events.ndj
 | `scan2ebook ocr <slug-or-path> <out>` | Stage 1: OCR per page (slug hoặc explicit book-home path) |
 | `scan2ebook ocr <slug-or-path> <out> --dry-run` | Đếm trang + ước lượng chi phí, không gọi API |
 | `scan2ebook ocr <slug-or-path> <out> --limit 10` | OCR tối đa 10 trang đầu |
-| `scan2ebook ocr <slug-or-path> <out> --workers 8` | Parallel cao hơn (cẩn thận rate limit) |
+| `scan2ebook ocr <slug-or-path> <out> --workers 16` | Parallel cao hơn default 12 (cẩn thận rate limit) — `--workers 4` để hạ nếu hay 429 |
 | `scan2ebook ocr <slug-or-path> <out> --max-tokens 16000` | Tăng trần output cho trang text rất dày |
 | `scan2ebook ocr <slug-or-path> <out> --model <id>` | Đổi vision model (hoặc đặt env `OCR_MODEL`) |
 | `scan2ebook ocr <slug-or-path> <out> --json` | JSON summary output |

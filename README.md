@@ -39,11 +39,14 @@ output before running your own book.
   rclone are the only external tools, and only pandoc is required.
 - **Book-aware OCR** — a context pre-pass reads a handful of sample pages first to
   detect the title, proper names, spelling conventions, and two-page spreads, then
-  feeds that back into every page's prompt for consistent results.
+  feeds that back into every page's prompt for consistent results. Also prevents cover
+  and back-matter decoration (title, publisher, price) from being marked as headings
+  and appearing in the table of contents.
 - **Image or PDF input** — point it at a folder of page images or at a single PDF
   of the book; PDFs are rendered to per-page JPGs at import (`pdftoppm` → `magick`
-  → `sips`). Works on born-digital PDFs whose text layer is broken — it OCRs the
-  rendered pages, never the garbled text.
+  → `sips`, whichever is available). Works on both scanned PDFs and born-digital PDFs
+  whose text layer is broken — it OCRs the rendered pages, never the garbled text,
+  giving consistent results for both.
 - **Cross-platform HEIC/HEIF** — iPhone photos are auto-converted to JPG at import,
   trying `sips` (macOS) → ImageMagick `magick` → `heif-convert` → `pillow-heif`,
   whichever is available.

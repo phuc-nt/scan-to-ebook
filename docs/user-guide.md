@@ -212,7 +212,81 @@ scan2ebook all ~/Books-inbox/namphong-q01 --smoke --yes
 
 Nếu không tty (pipe/non-interactive) mà không có `--yes`, abort an toàn (không treo `input()`).
 
-## Chạy full pipeline
+## Manga EPUB3 fixed-layout
+
+Để build manga/truyện tranh dưới dạng **EPUB3 fixed-layout (pre-paginated) RTL** mà KHÔNG OCR:
+
+```bash
+scan2ebook manga my-manga --from ~/scans-folder
+```
+
+**Positional slug** nhận SLUG (folder name) hoặc PATH (đường dẫn tuyệt đối/tương đối). Ví dụ:
+```bash
+scan2ebook manga /abs/path/to/book --from ~/scans
+scan2ebook manga sub/book --from ~/scans
+scan2ebook manga my-manga --from ~/scans
+```
+
+**Inputs** (tự động normalize thành `scans/page_NNN.<ext>`):
+- **Thư mục ảnh** — PNG, JPG (auto-sort tự nhiên)
+- **.mobi/.azw3** — carves images từ PDB records, filters by size (>1000 bytes)
+- **.cbz/.cbr/.zip** — extracts with zip-slip guard; CBR needs `unar` or `unrar` (install hint if missing)
+- **Google Drive file** — single PDF/EPUB to download; hoặc Drive **folder** để list + download toàn bộ
+  - Folder listing via undocumented embeddedfolderview scrape (tolerant regex, falls back to manual prompt)
+  - SSRF-safe: URL-rebuild từ extracted file-id
+
+**Metadata flags**:
+- `--title "..."` — explicit title (thắng luôn, không derive). Nếu bỏ qua + có `--series` + `--series-index` → auto derive title thành `"Series 01"` (vd `"Pluto 02"`). Nếu không có index → fallback slug.
+- `--author "..."` — tác giả
+- `--series "Naruto"` `--series-index 1` — tên bộ + số tập (auto-derive title nếu --title omit)
+- `--lang ja` (default) — language code
+- `--year` — năm xuất bản
+- `--subject` — default "Manga"
+- `--publisher` — nhà xuất bản
+- `--description` — mô tả
+
+**Display flags**:
+- `--rtl` (default true) — right-to-left spine direction (manga Nhật mặc định)
+- `--spread-reset 5,12` — manually re-anchor page-spread cadence at given pages (e.g. after color cover)
+- `--min-px 400` (default) — drop images smaller than 400px (warns on drop, avoids tiny thumbnails)
+
+**Cover detection**:
+- `--cover-index N` (default 1) — trang (1-based, sau lọc min-px) dùng làm bìa. Nếu bản scanlation chèn banner+bìa-sau trước bìa thật, trỏ tới index đúng (vd 3).
+- `--auto-cover` — dò bìa tự động qua vision LLM (cần `OPENROUTER_API_KEY`). Gửi vài trang đầu + hỏi model "trang nào là bìa trước thật?" → trả index 1-based. Mô hình không thấy bìa (tập bắt đầu giữa truyện) → fallback index 1. Lỗi mạng/parse → fallback index 1, build tiếp (cover không load-bearing như OCR). Manual `--cover-index N` (N≠1) đè `--auto-cover` (skip LLM, không tốn cost, in cảnh báo).
+- `--model <id>` — vision model cho `--auto-cover` (default = model OCR từ env `OCR_MODEL` hoặc `qwen3.7-plus`). Kỳ lạ: auto-cover là tiện ích, mặc định manga vẫn $0/offline, chỉ opt-in khi dùng `--auto-cover` mới gọi LLM.
+
+**Other flags**:
+- `--home <dir>` — custom data root (default `~/scan2ebook`)
+
+**Spread cadence** (RTL): cover & landscape images → `page-spread-center`; portrait images alternate `page-spread-right/left` starting right for RTL reading order.
+
+**Example**: Tải toàn bộ manga từ Google Drive folder, build EPUB:
+```bash
+scan2ebook manga bleach \
+  --from "https://drive.google.com/drive/folders/1Ax..." \
+  --title "Bleach" --author "Kubo Tite" \
+  --series "Bleach" --series-index 1
+```
+
+Auto-detect bìa từ LLM (require API key):
+```bash
+scan2ebook manga bleach --from ~/scans --series "Bleach" --series-index 1 --auto-cover
+```
+
+Auto series-title (khỏi gõ title, từ series+index tự derive):
+```bash
+scan2ebook manga pluto-taps --from ~/scans --series "Pluto" --series-index 2
+# → dc:title = "Pluto 02" (auto-derive), không cần --title
+```
+
+Rebuild từ existing `scans/` (sau khi chỉnh sửa metadata):
+```bash
+scan2ebook manga bleach
+```
+
+Output: `dist/<slug>.epub` — stable EPUB identity across rebuilds (uuid5 based on slug).
+
+## Chạy full OCR pipeline
 
 Khi đã verify smoke test (hoặc bỏ qua `--smoke` cho sách trusted), chạy `all` để gộp 3 stage (OCR + post + epub).
 
@@ -347,6 +421,12 @@ scan2ebook ocr ~/Books-inbox/namphong-q01 ~/output/ocr --json-lines > events.ndj
 | `scan2ebook doctor` | Self-check môi trường (python/pandoc/key/rclone) |
 | `scan2ebook doctor --json` | Self-check, JSON output |
 | `scan2ebook init <slug> --from <dir\|book.pdf\|drive-link>` | Tạo book + scans zone + import ảnh / render PDF / tải Drive + metadata mẫu |
+| `scan2ebook manga <slug> --from <dir\|.mobi\|.cbz\|drive-url>` | Build EPUB3 fixed-layout RTL manga (4 input forms); slug = folder name hoặc path |
+| `scan2ebook manga <slug> --series "Pluto" --series-index 2` | Manga với auto series-title (dc:title = "Pluto 02") |
+| `scan2ebook manga <slug> --auto-cover` | Auto-detect bìa qua vision LLM (cần OPENROUTER_API_KEY) |
+| `scan2ebook manga <slug> --cover-index 3` | Chỉ định trang bìa (1-based, sau lọc min-px) |
+| `scan2ebook manga <slug> --auto-cover --model google/gemini-3.1-pro-preview` | Auto-cover với model vision tùy chọn |
+| `scan2ebook manga <slug> --spread-reset 5,12 --min-px 400` | Manga với tuning cadence + min pixel |
 | `scan2ebook ocr <slug-or-path> <out>` | Stage 1: OCR per page (slug hoặc explicit book-home path) |
 | `scan2ebook ocr <slug-or-path> <out> --dry-run` | Đếm trang + ước lượng chi phí, không gọi API |
 | `scan2ebook ocr <slug-or-path> <out> --limit 10` | OCR tối đa 10 trang đầu |

@@ -81,11 +81,29 @@ def normalize_input(src: str, scans_dir: Path) -> int:
     )
 
 
+def _derive_title(title: str | None, series: str | None, series_index, slug: str) -> str:
+    """Suy dc:title cuối: title tay > 'Series NN' (series+index) > slug.
+
+    Bộ truyện nhiều tập: chỉ cần `--series Pluto --series-index 1`, KHỎI gõ
+    `--title "Pluto 01"` từng tập (file trên thiết bị vẫn phân biệt được). title
+    tay luôn thắng. series_index zero-pad 2 chữ số (01, 02 … 10) cho sort đúng.
+    """
+    if title:
+        return title
+    if series and series_index is not None:
+        try:
+            return f"{series} {int(series_index):02d}"
+        except (TypeError, ValueError):
+            return f"{series} {series_index}"
+    return slug
+
+
 def load_manga_metadata(scans_dir: Path, slug: str) -> dict:
     """Đọc metadata.json (schema manga). Thiếu/file hỏng → mặc định.
 
     Loader RIÊNG, KHÔNG đụng pipeline._load_metadata (chữ default lang="vi", manga
     "ja"). Field thiếu trong file cũ → default None/giá trị manga (tương thích lùi).
+    title trống → suy từ series+index (_derive_title), cuối cùng mới fallback slug.
     """
     meta = dict(_MANGA_DEFAULTS)
     meta["title"] = slug
@@ -101,7 +119,9 @@ def load_manga_metadata(scans_dir: Path, slug: str) -> dict:
     for k in _MANGA_DEFAULTS:
         if d.get(k) is not None:
             meta[k] = d[k]
-    meta["title"] = d.get("title") or slug
+    meta["title"] = _derive_title(
+        d.get("title"), meta["series"], meta["series_index"], slug
+    )
     return meta
 
 
@@ -115,7 +135,9 @@ def write_manga_metadata(scans_dir: Path, slug: str, args) -> None:
         print(f"metadata.json đã tồn tại, giữ nguyên: {meta_file}")
         return
     meta = {
-        "title": getattr(args, "title", None) or slug,
+        # title=None để dành: load_manga_metadata suy 'Series NN' (series+index)
+        # hoặc slug lúc đọc — KHÔNG đóng băng slug ở đây (mất cơ hội auto series-title).
+        "title": getattr(args, "title", None),
         "author": getattr(args, "author", None),
         "lang": getattr(args, "lang", None) or "ja",
         "year": getattr(args, "year", None),

@@ -87,6 +87,30 @@ def _image_dims(p: Path) -> tuple[int, int] | None:
     return None
 
 
+def filtered_pages(img_dir: Path | str, min_px: int = 400) -> list[tuple[Path, tuple[int, int]]]:
+    """Trả list (path, (w,h)) đã natural-sort + lọc min_px — ĐÚNG thứ tự build() dùng.
+
+    Tách ra làm nguồn-sự-thật-DUY-NHẤT cho thứ tự trang: auto-cover detect phải dò
+    trên CÙNG list đã lọc này thì index trả về mới khớp cover_index lúc build (nếu
+    min_px loại 1 trang đầu, offset lệch — xem gotcha ở docstring build/cover_index).
+    Bỏ ảnh không đọc được dims (warn) và ảnh < min_px (đếm, không warn ở đây — build
+    warn tổng). KHÔNG raise khi rỗng (caller quyết định)."""
+    img_dir = Path(img_dir)
+    imgs = sorted(
+        [p for p in img_dir.iterdir() if p.suffix.lower() in _IMG_EXTS],
+        key=ocr.natural_sort_key,
+    )
+    pages: list[tuple[Path, tuple[int, int]]] = []
+    for p in imgs:
+        dims = _image_dims(p)
+        if dims is None:
+            continue
+        if max(dims) < min_px:
+            continue
+        pages.append((p, dims))
+    return pages
+
+
 def build(
     img_dir: Path | str,
     out_epub: Path | str,
@@ -117,22 +141,20 @@ def build(
     img_dir = Path(img_dir)
     out_epub = Path(out_epub)
 
-    # Tập hợp ảnh: jpg + png + gif, natural-sort (page_9 < page_10).
+    # Thứ tự trang = filtered_pages (nguồn-sự-thật chung với auto-cover detect).
+    # Tự đếm/cảnh báo ảnh bị bỏ ở đây để giữ log chi tiết (filtered_pages im lặng).
     imgs = sorted(
         [p for p in img_dir.iterdir() if p.suffix.lower() in _IMG_EXTS],
         key=ocr.natural_sort_key,
     )
-    pages: list[tuple[Path, tuple[int, int]]] = []
     dropped_small = 0
     for p in imgs:
         dims = _image_dims(p)
         if dims is None:
             print(f"WARN bỏ qua {p.name}: không đọc được kích thước", file=sys.stderr)
-            continue
-        if max(dims) < min_px:
+        elif max(dims) < min_px:
             dropped_small += 1
-            continue
-        pages.append((p, dims))
+    pages = filtered_pages(img_dir, min_px)
 
     if not pages:
         raise SystemExit(f"epub3_fixed_layout: không có trang nào hợp lệ trong {img_dir}")

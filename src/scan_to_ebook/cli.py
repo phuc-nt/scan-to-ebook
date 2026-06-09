@@ -368,8 +368,43 @@ def cmd_manga(args: argparse.Namespace) -> int:
     meta = manga_pipeline.load_manga_metadata(bp.scans_dir, slug)
     print(f"==> {slug} | title={meta['title']!r} | lang={meta['lang']} rtl={meta['rtl']}")
     spread_reset = manga_pipeline.parse_spread_reset(args.spread_reset)
+
+    cover_index = args.cover_index
+    if args.auto_cover:
+        if cover_index != 1:
+            # --cover-index tay (khác mặc định) thắng --auto-cover: tôn trọng chỉ
+            # định người dùng, KHÔNG gọi LLM (khỏi cần key, khỏi tốn cost).
+            print(
+                f"WARN --cover-index {cover_index} đè --auto-cover (dùng index tay, bỏ qua dò LLM)",
+                file=sys.stderr,
+            )
+        else:
+            from . import manga_cover_detect
+
+            api_key = ocr.require_api_key()  # SystemExit sạch nếu thiếu key
+            try:
+                cover_index, info = manga_cover_detect.detect_cover_index(
+                    api_key, args.model, bp.scans_dir, args.min_px
+                )
+                src = "LLM" if info["from_model"] else "fallback (model không thấy bìa)"
+                print(
+                    f"auto-cover: trang {cover_index} [{src}] "
+                    f"(${info['cost_usd']}) — {info['reason']}",
+                    file=sys.stderr,
+                )
+            except RuntimeError as exc:
+                # auto-cover là tiện ích, KHÔNG load-bearing như OCR prepass: lỗi
+                # mạng/parse không nên huỷ cả build (manga build vốn $0/offline) →
+                # fallback bìa trang 1, build tiếp, báo to.
+                cover_index = 1
+                print(
+                    f"WARN auto-cover thất bại ({exc}) → dùng bìa trang 1; "
+                    "chỉ định tay bằng --cover-index N nếu cần",
+                    file=sys.stderr,
+                )
+
     return manga_pipeline.build_manga(
-        bp, slug, meta, spread_reset, args.min_px, args.cover_index
+        bp, slug, meta, spread_reset, args.min_px, cover_index
     )
 
 
@@ -458,7 +493,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # manga
     p_manga = sub.add_parser("manga", help="Ảnh trang manga → EPUB3 fixed-layout RTL (không OCR)")
-    p_manga.add_argument("slug", help="tên sách (folder) HOẶC path tới book-home")
+    p_manga.add_argument("slug", type=Path, help="tên sách (folder) HOẶC path tới book-home")
     p_manga.add_argument("--home", type=Path, default=None, help="data-root (default $SCAN2EBOOK_HOME hoặc ~/scan2ebook)")
     p_manga.add_argument("--from", dest="from_src", default=None, help="thư mục ảnh | .mobi/.azw3 | .cbz/.cbr/.zip | link Drive (file/folder)")
     p_manga.add_argument("--title", default=None, help="title metadata (default = slug)")
@@ -474,6 +509,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_manga.add_argument("--spread-reset", dest="spread_reset", default=None, help="số trang tái neo nhịp ghép đôi, vd 5,12")
     p_manga.add_argument("--min-px", dest="min_px", type=int, default=400, help="bỏ ảnh nhỏ hơn N px (lọc thumbnail)")
     p_manga.add_argument("--cover-index", dest="cover_index", type=int, default=1, help="trang (1-based, sau lọc) dùng làm bìa; mặc định 1 (bản scan chèn banner → trỏ tới bìa thật, vd 3)")
+    p_manga.add_argument("--auto-cover", dest="auto_cover", action="store_true", help="dò bìa bằng vision LLM (cần OPENROUTER_API_KEY); --cover-index tay đè được")
+    p_manga.add_argument("--model", default=os.environ.get("OCR_MODEL", ocr.DEFAULT_MODEL), help="model vision cho --auto-cover (mặc định = model OCR)")
     p_manga.set_defaults(func=cmd_manga, rtl=True)
 
     return p

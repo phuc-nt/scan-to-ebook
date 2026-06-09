@@ -1,6 +1,10 @@
 # Kiến trúc
 
-## Pipeline 5 stage
+## Pipeline — Two paths
+
+Pipeline hỗ trợ hai luồng riêng biệt: **OCR prose pipeline** (5 stage, cho sách/tạp chí thông thường) và **manga EPUB3 fixed-layout pipeline** (parallel, cho manga/truyện tranh).
+
+### OCR Prose Pipeline (5 stage)
 
 Pipeline chia thành 5 stage tuần tự, mỗi stage là một module Python độc lập trong `src/scan_to_ebook/`. Mỗi stage đọc filesystem state của stage trước và ghi output xuống filesystem cho stage sau. Không có in-memory queue, không có database, không có process daemon.
 
@@ -85,6 +89,26 @@ scan-to-ebook/
 ```
 
 Mỗi stage là một module độc lập, có thể import và gọi trực tiếp từ Python script khác nếu cần. CLI là một layer mỏng dùng argparse, không có business logic ngoài việc parse args và gọi function của stage tương ứng.
+
+### Manga EPUB3 Fixed-Layout Pipeline
+
+Parallel pathway: `scan2ebook manga <slug> --from <input>` produces standard **EPUB3 fixed-layout (pre-paginated) RTL manga** from page images. NO OCR, NO pandoc—direct image→EPUB3 assembly, pure stdlib.
+
+**Positional slug** accepts both slug (folder name) and path-form arguments (absolute/relative path with `/` or `\`).
+
+**Inputs** normalized to `scans/page_NNN.<ext>`:
+1. Local image folder (via `_import_images` reuse)
+2. .mobi/.azw3 (PDB image carver: `mobi_extract.py`, filters >1000 bytes & min-dimension)
+3. .cbz/.cbr/.zip archives (natural-sort, zip-slip guard; CBR shells `unar`/`unrar` with backend probe)
+4. Google Drive file OR folder (SSRF-safe URL-rebuild + folder listing via embeddedfolderview scrape, tolerant regex)
+
+**Builder** (`epub3_fixed_layout.py`): reads `scans/`, writes `dist/<slug>.epub`. Spread cadence (RTL): landscape/cover = `page-spread-center`; portrait alternate `page-spread-right/left` starting right for RTL. Manual override `--spread-reset 5,12`. Metadata extended: series, series_index, subject (default "Manga"), lang (default "ja"), rtl (default true). Stable dc:identifier via uuid5. Min pixel filter drops thumbnails (warns on drop).
+
+**Auto cover detection** (opt-in `--auto-cover`): Module `manga_cover_detect.py` sends first N filtered pages (after min-px crop) + prompt to vision LLM asking "which is the real front cover?" Returns 1-based index on filtered page list (matches `cover_index` param). Model failure (network, parse error) or null result → fallback `cover_index=1`, build continues (cover not load-bearing like OCR prepass). Manual `--cover-index N` (N≠1) overrides auto-cover (skips LLM call, prints warn). Default manga build is unchanged: offline, $0, no API key. Auto-cover strictly opt-in.
+
+**Series title auto-derivation**: If `--title` omitted but `--series` AND `--series-index` given, EPUB `dc:title` auto-derived as `"{series} {index:02d}"` (e.g. `Pluto 02`). Explicit `--title` always wins. Series without index → fallback slug. `metadata.json` stores `title: null` when no explicit title (derivation deferred to load time, not frozen at import).
+
+**Validator** (`epub3_validate.py`): stdlib structural checks—7 gates: mimetype first+stored, zip CRC, container.xml, OPF parse, manifest hrefs exist, spine idrefs resolve, cover present. No epubcheck/JRE dependency.
 
 ## Thiết kế quyết định
 

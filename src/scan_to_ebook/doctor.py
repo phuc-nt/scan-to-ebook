@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import sys
 
-from . import image_ops, pdf_render
+from . import archive_extract, image_ops, pdf_render
 
 
 def _check_python() -> dict:
@@ -84,10 +84,22 @@ def _check_pdf_render() -> dict:
             "detail": f"none (PDF import disabled). {pdf_render._install_hint()}"}
 
 
+def _check_rar_backend() -> dict:
+    """Backend giải nén CBR/RAR optional — chỉ cần khi input là .cbr.
+
+    Vắng = warning (CBZ/ZIP vẫn chạy bình thường). Có ≥1 backend → liệt kê."""
+    backends = archive_extract.available_rar_backends()
+    if backends:
+        return {"name": "rar_backend", "ok": True, "essential": False,
+                "detail": f"available: {', '.join(backends)}"}
+    return {"name": "rar_backend", "ok": False, "essential": False,
+            "detail": f"none (CBR import disabled). {archive_extract._install_hint()}"}
+
+
 def run_checks() -> list[dict]:
     """Chạy tất cả check. Trả list dict{name, ok, essential, detail}. Không in gì."""
     return [_check_python(), _check_pandoc(), _check_key(), _check_heic(),
-            _check_pdf_render(), _check_rclone()]
+            _check_pdf_render(), _check_rar_backend(), _check_rclone()]
 
 
 def all_essential_ok(results: list[dict]) -> bool:

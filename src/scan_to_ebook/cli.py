@@ -28,7 +28,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import doctor, drive_download, drive_upload, epub_build, json_output, ocr, pipeline, post_process
+from . import doctor, drive_download, drive_upload, epub_build, json_output, manga_pipeline, ocr, pipeline, post_process
 
 # Re-export pipeline symbols dưới namespace `cli` để giữ tương thích test/cmd handlers
 # (vd test_cli_ux_helpers.py dùng `cli._slugify`/`cli._import_images`/`cli.EST_COST_PER_PAGE`).
@@ -332,6 +332,45 @@ def cmd_all(args: argparse.Namespace) -> int:
     )
 
 
+def cmd_manga(args: argparse.Namespace) -> int:
+    """Manga: nguồn ảnh trang → EPUB3 fixed-layout RTL. KHÔNG OCR, KHÔNG pandoc.
+
+    Positional `slug` nhận SLUG (ghép data-root) HOẶC PATH (dùng lại
+    _resolve_book_paths). `--from` = thư mục ảnh | .mobi/.azw3 | .cbz/.cbr/.zip |
+    link Drive (file/folder). Build → dist/<slug>.epub + validate cấu trúc."""
+    bp = pipeline._resolve_book_paths(args, args.slug)
+    slug = bp.book_home.name
+
+    if args.from_src:
+        # Guard re-import: scans/ đã có page_* → import mới để file mồ côi (mirror
+        # cmd_init). Fail nhanh trước khi tải/giải nén.
+        bp.scans_dir.mkdir(parents=True, exist_ok=True)
+        existing = list(bp.scans_dir.glob("page_*"))
+        if existing:
+            print(
+                f"scans/ đã có {len(existing)} file page_* — xoá chúng trước rồi "
+                f"chạy lại manga --from (tránh page rác): {bp.scans_dir}",
+                file=sys.stderr,
+            )
+            return 2
+        manga_pipeline.write_manga_metadata(bp.scans_dir, slug, args)
+        n = manga_pipeline.normalize_input(args.from_src, bp.scans_dir)
+        print(f"Imported {n} trang → scans/page_NNN.<ext>")
+
+    if not bp.scans_dir.is_dir() or not any(bp.scans_dir.glob("page_*")):
+        print(
+            f"book không có ảnh: {bp.scans_dir} "
+            f"(chạy `scan2ebook manga {slug} --from <nguồn>` trước)",
+            file=sys.stderr,
+        )
+        return 2
+
+    meta = manga_pipeline.load_manga_metadata(bp.scans_dir, slug)
+    print(f"==> {slug} | title={meta['title']!r} | lang={meta['lang']} rtl={meta['rtl']}")
+    spread_reset = manga_pipeline.parse_spread_reset(args.spread_reset)
+    return manga_pipeline.build_manga(bp, slug, meta, spread_reset, args.min_px)
+
+
 def _add_json_flags(parser: argparse.ArgumentParser) -> None:
     """Thêm cặp cờ output loại trừ nhau cho agent/script."""
     grp = parser.add_mutually_exclusive_group()
@@ -414,6 +453,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--folder", default=drive_upload.DEFAULT_FOLDER)
     _add_json_flags(p_all)
     p_all.set_defaults(func=cmd_all)
+
+    # manga
+    p_manga = sub.add_parser("manga", help="Ảnh trang manga → EPUB3 fixed-layout RTL (không OCR)")
+    p_manga.add_argument("slug", help="tên sách (folder) HOẶC path tới book-home")
+    p_manga.add_argument("--home", type=Path, default=None, help="data-root (default $SCAN2EBOOK_HOME hoặc ~/scan2ebook)")
+    p_manga.add_argument("--from", dest="from_src", default=None, help="thư mục ảnh | .mobi/.azw3 | .cbz/.cbr/.zip | link Drive (file/folder)")
+    p_manga.add_argument("--title", default=None, help="title metadata (default = slug)")
+    p_manga.add_argument("--author", default=None)
+    p_manga.add_argument("--series", default=None, help="tên bộ (belongs-to-collection)")
+    p_manga.add_argument("--series-index", dest="series_index", type=int, default=None, help="số tập trong bộ")
+    p_manga.add_argument("--lang", default="ja", help="ngôn ngữ (default ja)")
+    p_manga.add_argument("--year", default=None, help="năm xuất bản (dc:date)")
+    p_manga.add_argument("--subject", default="Manga")
+    p_manga.add_argument("--publisher", default=None)
+    p_manga.add_argument("--description", default=None)
+    p_manga.add_argument("--no-rtl", dest="rtl", action="store_false", help="đọc trái→phải (mặc định RTL kiểu manga Nhật)")
+    p_manga.add_argument("--spread-reset", dest="spread_reset", default=None, help="số trang tái neo nhịp ghép đôi, vd 5,12")
+    p_manga.add_argument("--min-px", dest="min_px", type=int, default=400, help="bỏ ảnh nhỏ hơn N px (lọc thumbnail)")
+    p_manga.set_defaults(func=cmd_manga, rtl=True)
 
     return p
 

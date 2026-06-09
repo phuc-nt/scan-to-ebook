@@ -120,6 +120,38 @@ def test_download_confirm_token_interstitial(tmp_path, monkeypatch):
     assert "confirm=t0k3n" in calls[1]
 
 
+def test_download_virus_scan_form_uses_usercontent_host(tmp_path, monkeypatch):
+    """REGRESSION (Pluto): file lớn → trang 'Virus scan warning' với form
+    <input name="confirm" value="t"> action=drive.usercontent.google.com.
+
+    Phải: (1) parse confirm token từ FORM field (không phải href), (2) request
+    lần 2 qua host usercontent kèm id + confirm. Bug cũ retry trên drive.google
+    .com/uc → vẫn trả HTML → file 394MB tải fail. SSRF: URL rebuild từ file-id.
+    """
+    calls: list[str] = []
+    virus_html = (
+        b'<html><head><title>Google Drive - Virus scan warning</title></head>'
+        b'<body><form id="download-form" '
+        b'action="https://drive.usercontent.google.com/download" method="get">'
+        b'<input type="hidden" name="id" value="ABC_123-x">'
+        b'<input type="hidden" name="export" value="download">'
+        b'<input type="hidden" name="confirm" value="t">'
+        b'<input type="hidden" name="uuid" value="dead-beef-uuid"></form></body></html>'
+    )
+    # mobi magic: type field "BOOK" tại offset 60:64
+    mobi = b"Pluto_1234" + b"\x00" * 50 + b"BOOK" + b"\x00" * 100
+    _mock_opener(monkeypatch, [virus_html, mobi], calls)
+    dest = tmp_path / "out.bin"
+    t = drive_download.download_drive_any(_URL_FILE, dest)
+    assert t == "mobi"
+    assert len(calls) == 2
+    assert calls[1].startswith("https://drive.usercontent.google.com/download")
+    assert "id=ABC_123-x" in calls[1]
+    assert "confirm=t" in calls[1]
+    # SSRF: id trong URL retry là file-id đã extract, KHÔNG phải href thô từ HTML
+    assert "drive.google.com/uc" not in calls[1]
+
+
 def test_download_not_pdf_raises(tmp_path, monkeypatch):
     """Cả 2 response đều không phải PDF (link private/folder) → ValueError, không ghi file."""
     calls: list[str] = []

@@ -64,6 +64,64 @@ def test_load_manga_metadata_corrupt_falls_back(tmp_path):
     assert meta["title"] == "slug"  # fallback
 
 
+# ----------------------------------------------------- #3 auto series-title (derive)
+
+def test_series_title_derived_when_title_absent(tmp_path):
+    """title trống + series + index → dc:title='Pluto 01' (zero-pad), KHÔNG phải slug."""
+    scans = tmp_path / "scans"
+    scans.mkdir()
+    (scans / "metadata.json").write_text(json.dumps({
+        "series": "Pluto", "series_index": 1,
+    }), encoding="utf-8")
+    meta = manga_pipeline.load_manga_metadata(scans, "pluto-01")
+    assert meta["title"] == "Pluto 01"
+
+
+def test_explicit_title_beats_series_derivation(tmp_path):
+    """title tay luôn thắng series+index."""
+    scans = tmp_path / "scans"
+    scans.mkdir()
+    (scans / "metadata.json").write_text(json.dumps({
+        "title": "PLUTO Deluxe", "series": "Pluto", "series_index": 1,
+    }), encoding="utf-8")
+    meta = manga_pipeline.load_manga_metadata(scans, "slug")
+    assert meta["title"] == "PLUTO Deluxe"
+
+
+def test_series_without_index_falls_back_to_slug(tmp_path):
+    """series nhưng KHÔNG index → không suy được số tập → slug."""
+    scans = tmp_path / "scans"
+    scans.mkdir()
+    (scans / "metadata.json").write_text(json.dumps({"series": "Pluto"}), encoding="utf-8")
+    meta = manga_pipeline.load_manga_metadata(scans, "pluto")
+    assert meta["title"] == "pluto"
+
+
+def test_derive_title_helper_edge_cases():
+    assert manga_pipeline._derive_title(None, "S", 7, "slug") == "S 07"
+    assert manga_pipeline._derive_title(None, "S", 12, "slug") == "S 12"
+    assert manga_pipeline._derive_title("T", "S", 1, "slug") == "T"
+    assert manga_pipeline._derive_title(None, None, 1, "slug") == "slug"
+    assert manga_pipeline._derive_title(None, "S", None, "slug") == "slug"
+
+
+def test_series_title_end_to_end_via_cli(tmp_path):
+    """CLI: --series + --series-index, KHÔNG --title → epub dc:title='Pluto 02'."""
+    src = _make_src_images(tmp_path, n=3)
+    home = tmp_path / "home"
+    rc = cli.main([
+        "manga", "pl2", "--home", str(home), "--from", str(src),
+        "--series", "Pluto", "--series-index", "2",
+    ])
+    assert rc == 0
+    scans = home / "pl2" / "scans"
+    # metadata.json lưu title=None (chưa đóng băng) — suy ở load.
+    raw = json.loads((scans / "metadata.json").read_text())
+    assert raw["title"] is None
+    meta = manga_pipeline.load_manga_metadata(scans, "pl2")
+    assert meta["title"] == "Pluto 02"
+
+
 # ---------------------------------------------------------------------- end-to-end CLI
 
 def test_manga_subcommand_end_to_end(tmp_path):
@@ -121,3 +179,17 @@ def test_manga_rebuild_from_existing_scans(tmp_path):
     rc = cli.main(["manga", "rb", "--home", str(home)])
     assert rc == 0
     assert epub.exists()
+
+
+# ----------------------------------------------- #2 path-form slug (was AttributeError)
+
+def test_manga_path_form_slug_resolves(tmp_path):
+    """REGRESSION: manga slug dạng PATH (có separator) phải resolve, KHÔNG crash
+    AttributeError. Trước fix, p_manga 'slug' thiếu type=Path → args.slug là str →
+    _resolve_book_paths gọi str.expanduser() → AttributeError."""
+    src = _make_src_images(tmp_path, n=3)
+    book_home = tmp_path / "books" / "mypath-book"  # path-form (có '/')
+    rc = cli.main(["manga", str(book_home), "--from", str(src)])
+    assert rc == 0
+    di = "di" + "st"
+    assert (book_home / di / "mypath-book.epub").exists()

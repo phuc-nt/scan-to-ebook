@@ -191,7 +191,26 @@ Loại trừ `.env` khỏi backup public.
 rclone sync ~/workspace/scan-to-ebook/ gdrive:Backup/repo/ --exclude .env --exclude .venv/ --progress
 ```
 
-## Limits đã biết
+## Manga EPUB3 fixed-layout — Troubleshooting
+
+**CBR backend absent** — pipeline shells `unar` or `unrar` to extract .cbr. If missing, install:
+```bash
+brew install unar        # macOS
+sudo apt install unar    # Ubuntu/Debian
+```
+Pipeline detects + hints at install if absent.
+
+**Drive folder listing fragility** — `embeddedfolderview` is undocumented HTML scrape. If real-world folder has different structure, tolerant regex may fail. Fallback: manual prompt guides user to manually download folder as .zip, then `--from <downloaded.zip>`.
+
+**Page order scrambled from Drive** — if filenames in folder aren't naturally sortable (random IDs), pipeline reorders by enumeration index during download to preserve folder order (fixes opaque-ID regression). Natural-sort always applied to final page set.
+
+**Spread cadence off** — RTL pagination may differ from reader's display (reader rendering unverified). Use `--spread-reset 5,12` to re-anchor cadence after unexpected breaks (e.g., inserted color cover between chapters).
+
+**min_px filter too aggressive** — small images (<400px) dropped with warning. Raise limit: `--min-px 200` to keep tiny art. Warn logged but visual impact hard to assess without reader.
+
+**EPUB validation fails** — `.epub` must validate structurally (7 stdlib checks). If error: check that ALL images in `scans/` are readable (try `file scans/*.jpg`) and exist in OPF manifest before rebuild.
+
+## OCR Pipeline — Limits đã biết
 
 Pipeline không xử lý tốt: sách có ảnh minh họa nhiều (model mô tả ảnh thay vì OCR, output rác), sách formula toán/khoa học (LaTeX rendering cần prompt riêng), sách nhạc với khuông nhạc (vision model không transcribe sheet music chính xác).
 

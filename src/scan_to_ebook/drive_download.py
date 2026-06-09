@@ -2,9 +2,10 @@
 
 Vì sao tự viết (không gdown / google-api): runtime pure-stdlib, không thêm
 dependency. Drive file công khai tải được qua endpoint `uc?export=download&id=<ID>`.
-File lớn (vượt ngưỡng quét virus của Drive) trả về 1 trang HTML interstitial kèm
-`confirm=<token>` thay vì bytes thật → ta parse token rồi request lại với
-`&confirm=<token>`. Cookiejar giữ session cookie để lần request thứ hai hợp lệ.
+File lớn (vượt ngưỡng quét virus của Drive) trả về 1 trang HTML interstitial
+"Virus scan warning" với form trỏ tới `drive.usercontent.google.com/download`.
+Ta phát hiện interstitial → request lại qua host usercontent kèm `confirm=t`.
+Cookiejar giữ session cookie để lần request thứ hai hợp lệ.
 
 Chỉ hỗ trợ FILE link và FOLDER link (không URL bất kỳ). Link sai/private/folder
 fail to ở `extract_file_id` / `extract_folder_id` hoặc kiểm tra magic bytes.
@@ -27,7 +28,11 @@ _DRIVE_HOST = "drive.google.com"
 _ID_RE = re.compile(r"/file/d/([\w-]+)")  # /file/d/<ID>/view
 _FOLDER_RE = re.compile(r"/folders/([\w-]+)")  # /drive/folders/<ID>
 _CONFIRM_RE = re.compile(r"confirm=([\w-]+)")  # interstitial form action / href
+# Form virus-scan field: <input type="hidden" name="confirm" value="t">
+_CONFIRM_FORM_RE = re.compile(r'name="confirm"\s+value="([\w-]+)"')
 _TIMEOUT = 300
+# Host Drive dùng cho download file lớn sau khi qua trang virus-scan warning.
+_USERCONTENT_DL = "https://drive.usercontent.google.com/download"
 
 
 def is_drive_url(s: str) -> bool:
@@ -104,27 +109,36 @@ def _detect_type(data: bytes) -> str:
     return "unknown"
 
 
-def _download_bytes(url: str) -> bytes:
-    """Tải URL → bytes. Xử lý interstitial confirm-token của Drive.
+def _looks_like_payload(data: bytes) -> bool:
+    """True nếu data có magic byte của loại file ta hỗ trợ (không phải HTML)."""
+    return data[:4] == b"%PDF" or _detect_type(data) != "unknown"
 
-    Tái sử dụng chung cho download_drive_file và download_drive_any.
-    SSRF: caller phải đảm bảo url đã được tái tạo từ extracted ID — không bao
-    giờ truyền URL thô từ HTML vào đây.
+
+def _download_drive_bytes(fid: str, opener: urlreq.OpenerDirector) -> bytes:
+    """Tải file Drive theo ID → bytes, vượt qua trang virus-scan của file lớn.
+
+    Bước 1: GET drive.google.com/uc?export=download&id=<ID>.
+      - Nếu đã là payload (PDF/ảnh/zip/mobi) → trả luôn (file nhỏ).
+      - Nếu là HTML interstitial → parse confirm token rồi request lại qua host
+        usercontent (drive.usercontent.google.com/download), nơi Drive phục vụ
+        bytes thật cho file lớn.
+
+    SSRF-safe: cả hai URL đều TÁI TẠO từ `fid` đã extract — host cố định, chỉ
+    chèn fid + confirm token (token là chuỗi alnum từ form, không phải href điều
+    hướng). Không bao giờ fetch href thô từ HTML.
     """
-    opener = urlreq.build_opener(urlreq.HTTPCookieProcessor(http.cookiejar.CookieJar()))
-    data = _fetch(opener, url)
-    if data[:4] != b"%PDF" and _detect_type(data) == "unknown":
-        # Có thể là interstitial HTML cho file lớn → thử extract confirm token
-        token = _confirm_token(data)
-        if token:
-            data = _fetch(opener, url + "&confirm=" + token)
-    elif data[:4] != b"%PDF":
-        # Không phải PDF nhưng magic byte đã rõ (ảnh, zip...) → không cần retry
-        pass
-    else:
-        # PDF trực tiếp — xong
-        pass
-    return data
+    base = "https://drive.google.com/uc?export=download&id=" + fid
+    data = _fetch(opener, base)
+    if _looks_like_payload(data):
+        return data  # file nhỏ — bytes thật ngay lần đầu
+    # Interstitial HTML cho file lớn → lấy confirm token, tải lại qua usercontent.
+    token = _confirm_token(data)
+    if not token:
+        return data  # không phải interstitial nhận biết được → trả nguyên (caller xử lý)
+    retry = (
+        f"{_USERCONTENT_DL}?id={fid}&export=download&confirm={token}"
+    )
+    return _fetch(opener, retry)
 
 
 def download_drive_file(url: str, dest: Path) -> None:
@@ -134,13 +148,8 @@ def download_drive_file(url: str, dest: Path) -> None:
     ~100MB, khớp style repo). Raise ValueError nếu không ra PDF.
     """
     fid = extract_file_id(url)
-    base = "https://drive.google.com/uc?export=download&id=" + fid
     opener = urlreq.build_opener(urlreq.HTTPCookieProcessor(http.cookiejar.CookieJar()))
-    data = _fetch(opener, base)
-    if data[:4] != b"%PDF":
-        token = _confirm_token(data)  # parse trang interstitial HTML
-        if token:
-            data = _fetch(opener, base + "&confirm=" + token)
+    data = _download_drive_bytes(fid, opener)
     if data[:4] != b"%PDF":
         raise ValueError(
             "Tải Drive không ra PDF (link không public, là folder, hoặc bị chặn?)"
@@ -155,16 +164,9 @@ def download_drive_any(url: str, dest: Path) -> str:
     Raise ValueError nếu type == 'unknown' (link private, bị chặn, hoặc HTML trả về).
     """
     fid = extract_file_id(url)
-    base = "https://drive.google.com/uc?export=download&id=" + fid
     opener = urlreq.build_opener(urlreq.HTTPCookieProcessor(http.cookiejar.CookieJar()))
-    data = _fetch(opener, base)
-    # Thử confirm token nếu chưa rõ type (có thể là interstitial)
+    data = _download_drive_bytes(fid, opener)
     t = _detect_type(data)
-    if t == "unknown":
-        token = _confirm_token(data)
-        if token:
-            data = _fetch(opener, base + "&confirm=" + token)
-            t = _detect_type(data)
     if t == "unknown":
         raise ValueError(
             f"Tải Drive không nhận dạng được loại file (link private/bị chặn/interstitial "
@@ -213,5 +215,11 @@ def _fetch(opener: urlreq.OpenerDirector, url: str) -> bytes:
 
 
 def _confirm_token(html: bytes) -> str | None:
-    m = _CONFIRM_RE.search(html.decode("utf-8", "ignore"))
+    """Trích confirm token từ interstitial. Hỗ trợ 2 dạng:
+
+    - form virus-scan mới: <input name="confirm" value="t">
+    - href/cũ: ...&confirm=<token>...
+    """
+    text = html.decode("utf-8", "ignore")
+    m = _CONFIRM_FORM_RE.search(text) or _CONFIRM_RE.search(text)
     return m.group(1) if m else None

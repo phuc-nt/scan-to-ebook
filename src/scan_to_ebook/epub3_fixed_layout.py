@@ -103,9 +103,17 @@ def build(
     subject: str = "Manga",
     description: str | None = None,
     spread_reset: set[int] | None = None,
+    cover_index: int = 1,
     modified: str | None = None,
 ) -> dict:
-    """Build EPUB3 fixed-layout. Trả stats: pages, double_pages, ppd, size_bytes, valid, errors."""
+    """Build EPUB3 fixed-layout. Trả stats: pages, double_pages, ppd, size_bytes, valid, errors.
+
+    cover_index (1-based, sau khi lọc min_px): trang dùng làm cover-image trong
+    thư viện reader. Mặc định 1 (trang đầu). Bản scan đôi khi chèn banner nhóm
+    dịch / bìa-sau trước bìa thật → chỉ cover_index tới trang bìa thật. Chỉ đổi
+    cover-image (manifest property + OPF meta + nav landmark), KHÔNG đổi thứ tự
+    trang hay nhịp ghép đôi spine — banner vẫn nằm trong sách như bản gốc scan.
+    """
     img_dir = Path(img_dir)
     out_epub = Path(out_epub)
 
@@ -158,6 +166,16 @@ def build(
         'media-type="application/oebps-package+xml"/></rootfiles></container>',
     )
 
+    # cover_index 1-based trên list pages ĐÃ lọc min_px. Clamp vào [1, len] —
+    # ngoài khoảng → fallback trang 1 + cảnh báo (tránh sách không có cover-image).
+    if cover_index < 1 or cover_index > len(pages):
+        print(
+            f"WARN cover_index={cover_index} ngoài [1,{len(pages)}] → dùng trang 1",
+            file=sys.stderr,
+        )
+        cover_index = 1
+    cover_xhtml = f"xhtml/page_{cover_index:04d}.xhtml"
+
     manifest, spine, pagelist = [], [], []
     side = first_side
     for i, (p, (w, h)) in enumerate(pages, 1):
@@ -178,7 +196,7 @@ def build(
         )
         z.writestr(f"OEBPS/{xname}", xhtml)
 
-        cover = ' properties="cover-image"' if i == 1 else ""
+        cover = ' properties="cover-image"' if i == cover_index else ""
         manifest.append(
             f'<item id="img{i}" href="{imgname}" media-type="{media_type}"{cover}/>'
         )
@@ -218,14 +236,14 @@ def build(
         'xmlns:epub="http://www.idpf.org/2007/ops">\n'
         '<head><meta charset="utf-8"/><title>Navigation</title></head>\n<body>\n'
         '<nav epub:type="toc" id="toc"><h1>Contents</h1><ol>'
-        '<li><a href="xhtml/page_0001.xhtml">Cover</a></li>'
+        f'<li><a href="{cover_xhtml}">Cover</a></li>'
         + toc_start
         + "</ol></nav>\n"
         '<nav epub:type="page-list" id="page-list" hidden=""><h2>Pages</h2><ol>'
         + "".join(pagelist)
         + "</ol></nav>\n"
         '<nav epub:type="landmarks" id="landmarks" hidden=""><h2>Landmarks</h2><ol>'
-        '<li><a epub:type="cover" href="xhtml/page_0001.xhtml">Cover</a></li>'
+        f'<li><a epub:type="cover" href="{cover_xhtml}">Cover</a></li>'
         + landmark_start
         + "</ol></nav>\n</body></html>"
     )
@@ -279,7 +297,7 @@ def build(
         '<meta property="schema:accessibilityHazard">none</meta>\n'
         "<meta property=\"schema:accessibilitySummary\">"
         "Image-only manga; pages are scanned bitmaps with no text layer.</meta>\n"
-        '<meta name="cover" content="img1"/>\n'
+        f'<meta name="cover" content="img{cover_index}"/>\n'
         "</metadata>\n<manifest>\n"
         + "\n".join(manifest)
         + "\n</manifest>\n"

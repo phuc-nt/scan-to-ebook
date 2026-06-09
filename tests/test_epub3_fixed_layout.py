@@ -200,6 +200,72 @@ def test_no_valid_pages_raises(tmp_path):
         efl.build(img_dir=scans, out_epub=out, slug="s", title="T", author=None)
 
 
+# ------------------------------------------------------------------------- cover_index
+
+def _cover_refs(epub_path):
+    """Trả (manifest_cover_href, opf_meta_cover_content, nav_cover_href)."""
+    with zipfile.ZipFile(epub_path) as z:
+        opf = z.read("OEBPS/content.opf").decode("utf-8")
+        nav = z.read("OEBPS/nav.xhtml").decode("utf-8")
+    root = ET.fromstring(opf)
+    manifest = root.find(f"{{{_OPF_NS}}}manifest")
+    cover_item = next(
+        it for it in manifest.findall(f"{{{_OPF_NS}}}item")
+        if (it.get("properties") or "") and "cover-image" in it.get("properties")
+    )
+    meta_cover = next(
+        m for m in root.iter(f"{{{_OPF_NS}}}meta") if m.get("name") == "cover"
+    )
+    # nav landmark <a epub:type="cover" href="...">
+    nav_root = ET.fromstring(nav)
+    cover_a = next(
+        a for a in nav_root.iter("{http://www.w3.org/1999/xhtml}a")
+        if a.get("{http://www.idpf.org/2007/ops}type") == "cover"
+    )
+    return cover_item.get("href"), meta_cover.get("content"), cover_a.get("href")
+
+
+def test_cover_index_marks_chosen_page(tmp_path):
+    """REGRESSION (Pluto): bản scan chèn banner trước bìa thật. cover_index=3 →
+    cover-image + OPF meta + nav landmark đều trỏ trang 3, KHÔNG phải trang 1."""
+    scans = tmp_path / "scans"
+    scans.mkdir()
+    for i in range(1, 6):
+        (scans / f"page_{i:03d}.jpg").write_bytes(make_jpeg(800, 1200))
+    out = tmp_path / "out.epub"
+    efl.build(img_dir=scans, out_epub=out, slug="s", title="T", author=None,
+              cover_index=3)
+    href, meta_content, nav_href = _cover_refs(out)
+    assert href == "img/page_0003.jpg"
+    assert meta_content == "img3"
+    assert nav_href == "xhtml/page_0003.xhtml"
+
+
+def test_cover_index_default_is_first_page(image_scans_dir, tmp_path):
+    """Mặc định cover_index=1 → trang 1 là bìa (hành vi cũ không đổi)."""
+    out = tmp_path / "out.epub"
+    efl.build(img_dir=image_scans_dir, out_epub=out, slug="s", title="T", author=None)
+    href, meta_content, nav_href = _cover_refs(out)
+    assert href == "img/page_0001.jpg"
+    assert meta_content == "img1"
+    assert nav_href == "xhtml/page_0001.xhtml"
+
+
+def test_cover_index_out_of_range_clamps_to_first(tmp_path, capsys):
+    """cover_index ngoài [1,len] → fallback trang 1 + WARN (không để sách thiếu bìa)."""
+    scans = tmp_path / "scans"
+    scans.mkdir()
+    for i in range(1, 4):
+        (scans / f"page_{i:03d}.jpg").write_bytes(make_jpeg(800, 1200))
+    out = tmp_path / "out.epub"
+    efl.build(img_dir=scans, out_epub=out, slug="s", title="T", author=None,
+              cover_index=99)
+    href, meta_content, _ = _cover_refs(out)
+    assert href == "img/page_0001.jpg"
+    assert meta_content == "img1"
+    assert "cover_index=99 ngoài" in capsys.readouterr().err
+
+
 # ------------------------------------------------------------------------- validator
 
 def test_validate_good_epub(image_scans_dir, tmp_path):

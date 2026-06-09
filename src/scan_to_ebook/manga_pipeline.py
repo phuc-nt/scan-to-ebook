@@ -158,7 +158,7 @@ def parse_spread_reset(raw: str | None) -> set[int]:
 
 
 def build_manga(bp: pipeline.BookPaths, slug: str, meta: dict, spread_reset: set[int],
-                min_px: int) -> int:
+                min_px: int, cover_index: int = 1) -> int:
     """Gọi builder EPUB3 fixed-layout → dist/<slug>.epub. Trả exit code.
 
     Builder import lazy (Phase 04 thêm module). Builder trả stats gồm `valid`
@@ -184,6 +184,7 @@ def build_manga(bp: pipeline.BookPaths, slug: str, meta: dict, spread_reset: set
         subject=meta["subject"],
         description=meta["description"],
         spread_reset=spread_reset,
+        cover_index=cover_index,
     )
     valid = stats.get("valid", True)
     glyph = "✓" if valid else "WARN cấu trúc EPUB lỗi"

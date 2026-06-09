@@ -368,7 +368,9 @@ def cmd_manga(args: argparse.Namespace) -> int:
     meta = manga_pipeline.load_manga_metadata(bp.scans_dir, slug)
     print(f"==> {slug} | title={meta['title']!r} | lang={meta['lang']} rtl={meta['rtl']}")
     spread_reset = manga_pipeline.parse_spread_reset(args.spread_reset)
-    return manga_pipeline.build_manga(bp, slug, meta, spread_reset, args.min_px)
+    return manga_pipeline.build_manga(
+        bp, slug, meta, spread_reset, args.min_px, args.cover_index
+    )
 
 
 def _add_json_flags(parser: argparse.ArgumentParser) -> None:
@@ -471,6 +473,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_manga.add_argument("--no-rtl", dest="rtl", action="store_false", help="đọc trái→phải (mặc định RTL kiểu manga Nhật)")
     p_manga.add_argument("--spread-reset", dest="spread_reset", default=None, help="số trang tái neo nhịp ghép đôi, vd 5,12")
     p_manga.add_argument("--min-px", dest="min_px", type=int, default=400, help="bỏ ảnh nhỏ hơn N px (lọc thumbnail)")
+    p_manga.add_argument("--cover-index", dest="cover_index", type=int, default=1, help="trang (1-based, sau lọc) dùng làm bìa; mặc định 1 (bản scan chèn banner → trỏ tới bìa thật, vd 3)")
     p_manga.set_defaults(func=cmd_manga, rtl=True)
 
     return p

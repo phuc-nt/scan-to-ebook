@@ -237,7 +237,7 @@ scan2ebook manga my-manga --from ~/scans
 
 **Metadata flags**:
 - `--title "..."` — explicit title (thắng luôn, không derive). Nếu bỏ qua + có `--series` + `--series-index` → auto derive title thành `"Series 01"` (vd `"Pluto 02"`). Nếu không có index → fallback slug.
-- `--author "..."` — tác giả
+- `--author "..."` — tác giả. **Lưu ý**: khác pipeline OCR prose, manga KHÔNG auto-detect author — bạn phải truyền `--author` hoặc EPUB sẽ hiển thị "Unknown Author".
 - `--series "Naruto"` `--series-index 1` — tên bộ + số tập (auto-derive title nếu --title omit)
 - `--lang ja` (default) — language code
 - `--year` — năm xuất bản

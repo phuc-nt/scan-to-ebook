@@ -191,6 +191,18 @@ Loại trừ `.env` khỏi backup public.
 rclone sync ~/workspace/scan-to-ebook/ gdrive:Backup/repo/ --exclude .env --exclude .venv/ --progress
 ```
 
+## Manga EPUB3 fixed-layout — Auto-cover operation
+
+**`--auto-cover` cost and scope**
+- Strictly opt-in: default manga build is $0/offline, no API key required.
+- `--auto-cover` is the ONLY manga path that spends money — sends first N filtered pages (after min-px crop) + prompt to vision LLM asking "which is the real front cover?" (~$0.01/book, a few downscaled pages).
+- Model failure (network timeout, parse error) or null result (no cover detected) → fallback to `cover_index=1` and build still succeeds. Cover is NOT load-bearing like OCR prepass.
+- Manual `--cover-index N` (where N≠1) overrides `--auto-cover` → skips LLM call, prints warning.
+
+**"Unknown Author" fix**
+- Manga does NOT auto-backfill author (unlike OCR prose). You must pass `--author "..."` or EPUB shows "Unknown Author".
+- Cheap workaround: pre-populate `scans/metadata.json` with `author` field, then rebuild from existing scans (no re-download, no LLM cost). Manga reuses `metadata.json` like prose pipeline.
+
 ## Manga EPUB3 fixed-layout — Troubleshooting
 
 **CBR backend absent** — pipeline shells `unar` or `unrar` to extract .cbr. If missing, install:

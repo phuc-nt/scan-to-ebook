@@ -22,7 +22,7 @@ Chi phí thực tế khoảng $0.05/trang A4 cho Gemini 3.1 Pro, tức $10 cho s
 
 Pipeline hỗ trợ hai luồng riêng biệt:
 
-**OCR Prose Pipeline** (4 stage chain): thư mục ảnh / PDF / Google Drive → OCR qua vision model → markdown merge → EPUB reflowable + TOC. Tối ưu cho sách/tạp chí văn bản thường.
+**OCR Prose Pipeline** (5 stage chain): thư mục ảnh / PDF / Google Drive → OCR qua vision model → markdown merge → EPUB reflowable + TOC. Tối ưu cho sách/tạp chí văn bản thường.
 
 **Manga EPUB3 Fixed-Layout Pipeline** (`manga` subcommand): 4 loại input (ảnh, .mobi, .cbz/.cbr, Google Drive) → direct image→EPUB3 pre-paginated RTL assembly, zero OCR. Tối ưu cho manga/truyện tranh. Hỗ trợ auto series-title derivation (nếu omit `--title` nhưng có `--series` + `--series-index`, title auto-gen thành `"Series NN"`), auto cover detection qua vision LLM (opt-in `--auto-cover`), và path-form slug (absolute/relative path, không chỉ folder name).
 

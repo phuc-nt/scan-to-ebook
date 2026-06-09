@@ -26,6 +26,9 @@ to judge the output before running your own book.
 
 ## Features
 
+Two standalone pipelines:
+
+**OCR Prose Pipeline** (`scan2ebook all`)
 - **Pure-stdlib runtime** — no third-party Python packages. pandoc and rclone are
   the only external tools, and only pandoc is required.
 - **Book-aware OCR** — a context pre-pass reads a handful of pages first to detect
@@ -41,7 +44,16 @@ to judge the output before running your own book.
 - **Agent-friendly CLI** — `doctor` self-check, `--dry-run`, `--json` /
   `--json-lines`, and `--yes` for non-interactive runs.
 
+**Manga EPUB3 Fixed-Layout Pipeline** (`scan2ebook manga`)
+- **Zero-cost offline mode** — EPUB3 pre-paginated RTL assembly with no OCR or pandoc,
+  just images → EPUB. Optional auto-cover detection via LLM (strictly opt-in, requires
+  OPENROUTER_API_KEY, costs ~$0.01/book).
+- **Flexible input** — folder of images, .mobi/.azw3, .cbz/.cbr, or Google Drive file/folder.
+- **Series metadata** — auto-derive title from series name + index if title omitted.
+
 ## Quickstart
+
+**OCR Prose Pipeline:**
 
 ```bash
 brew install pandoc rclone                                   # pandoc required; rclone only for upload
@@ -53,10 +65,16 @@ cp .env.example .env && $EDITOR .env                         # set OPENROUTER_AP
 .venv/bin/scan2ebook all my-book --smoke                     # OCR 10, preview, then confirm full run
 ```
 
-The finished book is at `~/scan2ebook/my-book/dist/my-book.epub`.
+**Manga EPUB3 Pipeline:**
 
-Full walkthrough — preparing scans, editing context, manual fixes, upload — is in
-the **[User guide](docs/user-guide.md)**. Automating it in CI or from an agent? See
+```bash
+.venv/bin/scan2ebook manga my-manga --from ./images --author "Author Name" --series "My Series" --series-index 1
+```
+
+The finished book is at `~/scan2ebook/<slug>/dist/<slug>.epub`.
+
+Full walkthroughs — preparing scans, editing context, manual fixes, upload — are in
+the **[User guide](docs/user-guide.md)** (includes both pipelines). Automating it in CI or from an agent? See
 **[For agents and automated pipelines](docs/agents.md)**.
 
 ## OCR model & samples

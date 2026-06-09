@@ -73,19 +73,27 @@ scan-to-ebook/
 │   ├── product-overview.md
 │   ├── architecture.md    # file này
 │   ├── user-guide.md
-│   └── operations.md
+│   ├── operations.md
+│   └── agents.md
 └── src/scan_to_ebook/
     ├── __init__.py
     ├── pipeline.py        # Orchestration + shared helpers (import, metadata, path resolve)
     ├── pdf_render.py      # PDF → page-image render (pdftoppm/magick/sips backend-chain)
     ├── image_ops.py       # HEIC→JPG cross-platform convert + downscale
     ├── drive_download.py  # Google Drive file link → temp PDF (stdlib urllib, public link only)
-    ├── context_prepass.py # Stage 0
-    ├── ocr.py             # Stage 1
-    ├── post_process.py    # Stage 2
-    ├── epub_build.py      # Stage 3
-    ├── drive_upload.py    # Stage 4
-    └── cli.py             # argparse + cmd_ocr/post/epub/upload/all
+    ├── context_prepass.py # Stage 0: OCR prose pipeline
+    ├── ocr.py             # Stage 1: OCR prose pipeline
+    ├── post_process.py    # Stage 2: OCR prose pipeline
+    ├── epub_build.py      # Stage 3: OCR prose pipeline
+    ├── drive_upload.py    # Stage 4: OCR prose pipeline (optional)
+    ├── cli.py             # argparse + cmd_ocr/post/epub/upload/all + manga subcommand
+    ├── manga_pipeline.py  # Manga pipeline: dispatch input adapter + builder
+    ├── manga_cover_detect.py  # Manga: optional LLM-based cover index detection
+    ├── epub3_fixed_layout.py   # Manga builder: EPUB3 RTL assembly + filtering
+    ├── epub3_validate.py   # Manga/OCR: stdlib EPUB3 structural validator
+    ├── mobi_extract.py    # Manga: .mobi/.azw3 image extraction (PDB carver)
+    ├── archive_extract.py # Manga: .cbz/.cbr/.zip extraction (zip-slip safe)
+    └── drive_input.py     # Manga: Google Drive file/folder input (SSRF-safe)
 ```
 
 Mỗi stage là một module độc lập, có thể import và gọi trực tiếp từ Python script khác nếu cần. CLI là một layer mỏng dùng argparse, không có business logic ngoài việc parse args và gọi function của stage tương ứng.
@@ -102,7 +110,7 @@ Parallel pathway: `scan2ebook manga <slug> --from <input>` produces standard **E
 3. .cbz/.cbr/.zip archives (natural-sort, zip-slip guard; CBR shells `unar`/`unrar` with backend probe)
 4. Google Drive file OR folder (SSRF-safe URL-rebuild + folder listing via embeddedfolderview scrape, tolerant regex)
 
-**Builder** (`epub3_fixed_layout.py`): reads `scans/`, writes `dist/<slug>.epub`. Spread cadence (RTL): landscape/cover = `page-spread-center`; portrait alternate `page-spread-right/left` starting right for RTL. Manual override `--spread-reset 5,12`. Metadata extended: series, series_index, subject (default "Manga"), lang (default "ja"), rtl (default true). Stable dc:identifier via uuid5. Min pixel filter drops thumbnails (warns on drop).
+**Builder** (`epub3_fixed_layout.py`): reads `scans/`, writes `dist/<slug>.epub`. Spread cadence (RTL): landscape/cover = `page-spread-center`; portrait alternate `page-spread-right/left` starting right for RTL. Manual override `--spread-reset 5,12`. Metadata extended: series, series_index, subject (default "Manga"), lang (default "ja"), rtl (default true). Stable dc:identifier via uuid5. Min pixel filter drops thumbnails (warns on drop). **Single source of truth for page order**: both `build()` and `manga_cover_detect.detect_cover_index()` use `epub3_fixed_layout.filtered_pages(img_dir, min_px)` helper to get the filtered page list, ensuring `cover_index` (1-based on filtered list) remains consistent between detection time and build time.
 
 **Auto cover detection** (opt-in `--auto-cover`): Module `manga_cover_detect.py` sends first N filtered pages (after min-px crop) + prompt to vision LLM asking "which is the real front cover?" Returns 1-based index on filtered page list (matches `cover_index` param). Model failure (network, parse error) or null result → fallback `cover_index=1`, build continues (cover not load-bearing like OCR prepass). Manual `--cover-index N` (N≠1) overrides auto-cover (skips LLM call, prints warn). Default manga build is unchanged: offline, $0, no API key. Auto-cover strictly opt-in.
 

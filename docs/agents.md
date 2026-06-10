@@ -44,3 +44,30 @@ printf 'OPENROUTER_API_KEY=%s\n' "$OPENROUTER_API_KEY" > .env
 (`ok`/`partial`/`error`/`smoke`/`dry-run`), `pages`, `cost_usd`, and `paths`.
 **Exit codes:** `0` success, `1` partial/failed pages, `2` user error. Runs are
 resumable, so retrying after a crash or a raised credit cap is cheap and safe.
+
+## 4. Manga (image pages → EPUB3 fixed-layout, no OCR)
+
+Different pipeline, different command. Scanned manga/comic pages become a
+fixed-layout RTL EPUB3 — **no OCR, no pandoc, no OpenRouter key by default**
+(so `doctor`/`.env` above are not required for the default offline build):
+
+```bash
+.venv/bin/scan2ebook manga <slug> --from <folder> \
+  --author "Author Name" --series "Series Name" --series-index 1
+# result: ~/scan2ebook/<slug>/dist/<slug>.epub
+```
+
+`--from` accepts an image folder, a `.mobi/.azw3`, a `.cbz/.cbr/.zip`, or a
+Drive file/folder link. Notes for unattended runs:
+
+- **Always pass `--author`** — there is no auto-author. Omitting it ships the
+  EPUB with "Unknown Author". (Title can be auto-derived: `--series` +
+  `--series-index` with no `--title` → `dc:title` = "Series NN".)
+- **Cover:** default is page 1. Scans often prepend a banner, so the real cover
+  is a later page — pass `--cover-index N` (1-based, on the min-px-filtered
+  list) if you know it. `--auto-cover` detects it via a vision LLM but **needs
+  `OPENROUTER_API_KEY`** and costs ~$0.01/book; on null/error it falls back to
+  page 1 and the build still succeeds (rc 0). Manual `--cover-index` overrides
+  `--auto-cover`.
+- `--min-px 400` drops thumbnails; `--no-rtl` for left-to-right. This command
+  has **no `--json` mode** — parse the final `✓ … dist/<slug>.epub` stderr line.

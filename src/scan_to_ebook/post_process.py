@@ -105,18 +105,30 @@ def strip_code_fences(text: str) -> str:
     return text
 
 
+# ATX heading thiếu space sau dấu #: `##幽霊の家` (model CJK hay bỏ space ASCII).
+# CommonMark BẮT BUỘC space sau # → không có thì pandoc render thành text thường,
+# mất heading + mất split point. Chuẩn hoá `#`/`##` (≤6) liền ký tự non-# → chèn space.
+_ATX_NO_SPACE = re.compile(r"^(#{1,6})(?=[^#\s])")
+
+
+def _normalize_atx_heading(stripped: str) -> str:
+    """`##幽霊の家` → `## 幽霊の家`. Dòng không phải ATX heading: trả nguyên."""
+    return _ATX_NO_SPACE.sub(r"\1 ", stripped)
+
+
 def upgrade_chapter_headings(text: str) -> str:
     """Detect chapter line, upgrade thành `# Title` (h1, pandoc split point)."""
     out_lines = []
     for line in text.splitlines():
-        stripped = line.strip()
+        stripped = _normalize_atx_heading(line.strip())
         if stripped.startswith("# ") or stripped.startswith("## "):
             if stripped.startswith("## "):
                 body = stripped[3:].strip()
                 if _is_chapter_heading(body):
                     out_lines.append(f"# {body}")
                     continue
-            out_lines.append(line)
+            # giữ heading đã chuẩn-hoá (vd `##幽霊の家`→`## 幽霊の家`), KHÔNG dùng line gốc.
+            out_lines.append(stripped)
             continue
         if _is_chapter_heading(stripped):
             out_lines.append(f"# {stripped}")

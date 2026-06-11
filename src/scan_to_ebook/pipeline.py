@@ -416,7 +416,7 @@ def _run_prepass_or_abort(
     try:
         res = context_prepass.run_prepass(
             api_key, model, scans_dir, IMAGE_PATTERNS, max_tokens=max_tokens,
-            out_dir=work_dir,
+            out_dir=work_dir, lang=(meta.get("lang") if meta else None),
         )
     except RuntimeError as exc:
         if on_event:
@@ -476,6 +476,7 @@ def run_full_pipeline(
         api_key=api_key, input_dir=bp.scans_dir, output_dir=bp.ocr_dir,
         model=args.model, workers=args.workers, pattern=IMAGE_PATTERNS,
         max_tokens=args.max_tokens, on_event=on_event, prompt_context=block,
+        lang=meta.get("lang"),
     )
     pages = collector.pages() if collector else {
         "ok": summary["ok"], "blank": summary["blank"], "fail": summary["fail"],
@@ -543,6 +544,7 @@ def run_smoke_gate(args, bp: BookPaths, meta, mode, human_out, api_key):
         api_key=api_key, input_dir=bp.scans_dir, output_dir=bp.ocr_dir,
         model=args.model, workers=args.workers, pattern=IMAGE_PATTERNS,
         limit=10, max_tokens=args.max_tokens, on_event=on_event, prompt_context=block,
+        lang=meta.get("lang"),
     )
     if summary["fail"] > 0:
         # Smoke fail ngay → đừng ước cost / gate, báo lỗi để user sửa input/key.

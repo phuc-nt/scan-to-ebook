@@ -143,3 +143,21 @@ def test_upgrade_chapter_heading_promotes_to_h1():
     text = "Hồi thứ nhất\n\nNội dung mở đầu."
     out = post_process.upgrade_chapter_headings(text)
     assert out.startswith("# Hồi thứ nhất")
+
+
+def test_atx_heading_missing_space_normalized():
+    """`##幽霊の家` (model CJH bỏ space ASCII) → `## 幽霊の家` để pandoc nhận heading.
+
+    CommonMark bắt buộc space sau #; thiếu thì render thành text, mất split point + TOC.
+    Gặp thật ở OCR sách Nhật (デッドエンドの思い出 page_004)."""
+    assert post_process._normalize_atx_heading("##幽霊の家") == "## 幽霊の家"
+    assert post_process._normalize_atx_heading("#見出し") == "# 見出し"
+    assert post_process._normalize_atx_heading("##### x") == "##### x"  # đã có space → nguyên
+    assert post_process._normalize_atx_heading("普通の文。") == "普通の文。"  # văn xuôi không đụng
+
+
+def test_upgrade_keeps_cjk_h2_heading_with_normalized_space():
+    # h2 không phải keyword chương VN → giữ h2 nhưng đã chuẩn-hoá space (không rớt về line gốc).
+    out = post_process.upgrade_chapter_headings("##幽霊の家\n\n本文。")
+    assert "## 幽霊の家" in out
+    assert "##幽霊の家" not in out

@@ -204,6 +204,7 @@ def cmd_ocr(args: argparse.Namespace) -> int:
         limit=args.limit,
         max_tokens=args.max_tokens,
         on_event=on_event,
+        lang=args.lang,
     )
     rc = 0 if summary["fail"] == 0 else 1
     if mode == "json":
@@ -444,6 +445,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ocr.add_argument("--pattern", default=IMAGE_PATTERNS, help="glob ảnh, phân tách dấu phẩy (default PNG+JPG)")
     p_ocr.add_argument("--limit", type=int, default=None, help="OCR tối đa N page đầu (smoke test)")
     p_ocr.add_argument("--max-tokens", type=int, default=12000, help="max output tokens / page")
+    p_ocr.add_argument("--lang", default="vi", help="ngôn ngữ sách → chọn prompt OCR (vi mặc định | ja cho sách Nhật dọc RTL)")
     p_ocr.add_argument("--dry-run", action="store_true", help="đếm page + ước lượng chi phí, không gọi API")
     _add_json_flags(p_ocr)
     p_ocr.set_defaults(func=cmd_ocr)

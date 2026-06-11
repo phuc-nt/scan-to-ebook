@@ -80,6 +80,65 @@ content_type: "verse" nếu nội dung chính là THƠ (câu thơ xuống dòng 
 truyện-thơ, hoặc có cả đoạn văn lẫn khổ thơ). Soi các trang nội dung (bỏ bìa/mục lục)."""
 
 
+# Context pre-pass riêng cho sách tiếng NHẬT (dọc, đọc phải→trái). Nguồn thường là
+# ẢNH CHỤP MÀN HÌNH app đọc → phải bỏ qua menu/header/footer/dock khi phân tích.
+CONTEXT_PROMPT_JA = """You analyze a JAPANESE book through a few sample pages (front, middle, back)
+to extract context for consistent OCR across the whole book.
+
+THE IMAGES ARE SCREENSHOTS of a reading app (e.g. Kindle): each frame has an OS menu
+bar, an app header (running book title), a footer (reading progress / page %), and a
+dock. IGNORE all of that — analyze ONLY the book's own text/cover region.
+
+PAGES PER IMAGE (pages_per_image): count how many BOOK PAGES appear in ONE image
+(usually 1 or 2). A TWO-PAGE SPREAD (=2) is a LANDSCAPE frame with a center gutter,
+TWO separate text blocks, and Japanese reading order RIGHT page → LEFT page. A single
+centered text block / single page → 1. Return an integer.
+
+Each sample image is labeled by FILENAME on the line just BEFORE it ("[Ảnh: page_NNN.jpg]").
+Use that exact filename when you must point to a specific image (e.g. cover_page).
+
+COVER PAGE (cover_page): the cover is the image with the book's COLOR COVER
+ILLUSTRATION or large decorative title on the OUTSIDE (usually the first image). If the
+samples have NO real cover → null. Do not guess.
+
+Return ONLY one JSON object (no explanation, no ```json wrapper):
+{
+  "title": "book title if visible (in Japanese), else null",
+  "author": "author if visible (in Japanese), else null",
+  "translator": "translator if a translated work, else null",
+  "publisher": "publisher if visible, else null",
+  "year": "year if visible, else null",
+  "pages_per_image": 2,
+  "cover_page": "filename of the cover image (e.g. page_001.jpg) if a real cover, else null",
+  "content_type": "prose | verse | mixed",
+  "table_of_contents": [{"title": "chapter/section title", "page": 12}],
+  "proper_names": [{"seen": "as it appears", "canonical": "spelling to use consistently"}],
+  "terminology": ["distinctive terms/specialized vocabulary for this book"],
+  "layout_notes": "layout (vertical tategaki, columns right-to-left, headings, furigana)",
+  "footnote_convention": "how footnotes appear in this book, if any",
+  "ocr_pitfalls": ["likely OCR errors for this book's font/kanji"]
+}
+
+Rules: reproduce Japanese EXACTLY as printed (kanji/kana/punctuation), do NOT translate
+or romanize. Empty array when unknown. proper_names: prioritize repeated people/place
+names. table_of_contents: only if a real TOC appears in the samples, else empty array;
+do NOT treat decorative cover/title text or the colophon (title/author/publisher/price
+at the back) as TOC entries. content_type is usually "prose" for novels/essays."""
+
+
+# Registry context-prepass prompt theo ngôn ngữ. Mirror ocr.PROMPTS: vi mặc định
+# (verified), thêm ja. Base vi (CONTEXT_PROMPT) giữ nguyên byte-for-byte.
+CONTEXT_PROMPTS: dict[str, str] = {
+    "vi": CONTEXT_PROMPT,
+    "ja": CONTEXT_PROMPT_JA,
+}
+
+
+def context_prompt_for_lang(lang: str | None) -> str:
+    """Chọn context-prepass prompt theo lang. Lạ/None → CONTEXT_PROMPT (vi)."""
+    return CONTEXT_PROMPTS.get((lang or "vi").strip().lower(), CONTEXT_PROMPT)
+
+
 def select_sample_pages(pages: list[Path]) -> list[Path]:
     """Chọn ≤15 ảnh mẫu: 7 đầu + 4 giữa + 4 cuối, dedup giữ thứ tự.
 
@@ -129,14 +188,15 @@ def _encode_sample(path: Path) -> tuple[str, str]:
 
 
 def _post_context_once(
-    api_key: str, model: str, sample_b64s: list[tuple[str, str, str]], max_tokens: int
+    api_key: str, model: str, sample_b64s: list[tuple[str, str, str]], max_tokens: int,
+    lang: str | None = None,
 ) -> tuple[str, dict]:
     """1 POST đa-ảnh (1 text block + N×[nhãn tên + image_url] block). Reuse _post_once.
 
     `sample_b64s`: list (b64, mime, name). Nhãn "[Ảnh: <name>]" emit ngay trước mỗi
-    ảnh để LLM tham chiếu được tên file (vd trả cover_page). Raises RuntimeError
-    trên HTTP/parse error."""
-    content: list[dict] = [{"type": "text", "text": CONTEXT_PROMPT}]
+    ảnh để LLM tham chiếu được tên file (vd trả cover_page). `lang` chọn context prompt
+    (vi mặc định, ja cho sách Nhật). Raises RuntimeError trên HTTP/parse error."""
+    content: list[dict] = [{"type": "text", "text": context_prompt_for_lang(lang)}]
     for b64, mime, name in sample_b64s:
         content.append({"type": "text", "text": f"[Ảnh: {name}]"})
         content.append(
@@ -192,7 +252,8 @@ def _post_context_once(
 
 
 def _post_and_parse_context_once(
-    api_key: str, model: str, sample_b64s: list[tuple[str, str, str]], max_tokens: int
+    api_key: str, model: str, sample_b64s: list[tuple[str, str, str]], max_tokens: int,
+    lang: str | None = None,
 ) -> tuple[dict, dict]:
     """1 POST + parse JSON strict trong CÙNG 1 lần thử → (ctx_dict, meta).
 
@@ -200,7 +261,7 @@ def _post_and_parse_context_once(
     JSON hỏng) là lỗi transient của provider stream, đáng retry như whitespace body
     (giống robustness của ocr.ocr_page). Parse-fail raise RuntimeError chứa marker
     'parse' để ocr._is_transient bắt được → retry."""
-    content, meta = _post_context_once(api_key, model, sample_b64s, max_tokens)
+    content, meta = _post_context_once(api_key, model, sample_b64s, max_tokens, lang)
     try:
         ctx = json.loads(_strip_json_fence(content))
     except json.JSONDecodeError as exc:
@@ -216,7 +277,7 @@ def _post_and_parse_context_once(
 
 def _extract_with_retry(
     api_key: str, model: str, sample_b64s: list[tuple[str, str, str]], max_tokens: int,
-    retries: int = 2,
+    retries: int = 2, lang: str | None = None,
 ) -> tuple[dict, dict]:
     """_post_and_parse_context_once + retry transient (malformed/parse-fail/429/5xx/timeout).
 
@@ -226,7 +287,7 @@ def _extract_with_retry(
     last_exc: Exception | None = None
     for attempt in range(retries + 1):
         try:
-            return _post_and_parse_context_once(api_key, model, sample_b64s, max_tokens)
+            return _post_and_parse_context_once(api_key, model, sample_b64s, max_tokens, lang)
         except RuntimeError as exc:
             last_exc = exc
             if not ocr._is_transient(str(exc)) or attempt == retries:
@@ -237,14 +298,18 @@ def _extract_with_retry(
 
 
 def extract_context(
-    api_key: str, model: str, sample_paths: list[Path], max_tokens: int
+    api_key: str, model: str, sample_paths: list[Path], max_tokens: int,
+    lang: str | None = None,
 ) -> tuple[dict, dict]:
     """Gọi pre-pass đa-ảnh → strict JSON (POST+parse có retry). Raises nếu non-dict /
-    thiếu cấu trúc sau khi hết retry."""
+    thiếu cấu trúc sau khi hết retry. `lang` chọn context prompt (vi/ja)."""
     # (b64, mime, name): name = filename để LLM tham chiếu (cover_page).
     sample_b64s = [(*_encode_sample(p), p.name) for p in sample_paths]
-    ctx, meta = _extract_with_retry(api_key, model, sample_b64s, max_tokens)
+    ctx, meta = _extract_with_retry(api_key, model, sample_b64s, max_tokens, lang=lang)
     ctx["_generated_by"] = model
+    # Lưu lang vào ctx (source-of-truth) → render_block emit guidance RTL/spread theo
+    # ngôn ngữ; hand-edit context.json đổi lang vẫn re-derive block đúng (cache hit).
+    ctx["lang"] = (lang or "vi").strip().lower()
     return ctx, meta
 
 
@@ -303,6 +368,11 @@ def render_block(ctx: dict) -> str:
             head += f" ({', '.join(str(x) for x in (pub, year) if x)})"
         lines.append(head)
 
+    # Ngôn ngữ sách (lưu trong ctx lúc pre-pass; hand-edit đổi được). Sách dọc RTL
+    # (ja) → spread đọc PHẢI→TRÁI, ngược với mặc định LTR (vi).
+    lang = (ctx.get("lang") or "vi").strip().lower()
+    rtl = lang == "ja"
+
     try:
         ppi = int(ctx.get("pages_per_image") or 1)
     except (TypeError, ValueError):
@@ -311,10 +381,18 @@ def render_block(ctx: dict) -> str:
         ppi = 1
     lines.append(f"Số trang mỗi ảnh: {ppi}")
     if ppi >= 2:
-        lines.append(
-            f"ẢNH TRANG ĐÔI: mỗi ảnh có {ppi} trang sách (trái→phải). Đọc HẾT trang trái "
-            "rồi trang phải, nối thành một dòng Markdown liên tục; bỏ gáy/ngón tay/nền."
-        )
+        if rtl:
+            # Sách Nhật dọc: thứ tự đọc spread là PHẢI→TRÁI (ngược base prompt vi).
+            lines.append(
+                f"ẢNH TRANG ĐÔI (sách Nhật, đọc PHẢI→TRÁI): mỗi ảnh có {ppi} trang. Đọc "
+                "HẾT trang PHẢI trước rồi trang TRÁI, nối thành một dòng Markdown liên "
+                "tục; bỏ gáy/ngón tay/nền."
+            )
+        else:
+            lines.append(
+                f"ẢNH TRANG ĐÔI: mỗi ảnh có {ppi} trang sách (trái→phải). Đọc HẾT trang trái "
+                "rồi trang phải, nối thành một dòng Markdown liên tục; bỏ gáy/ngón tay/nền."
+            )
 
     toc = ctx.get("table_of_contents") or []
     if toc:
@@ -381,6 +459,7 @@ def run_prepass(
     max_tokens: int = CONTEXT_MAX_TOKENS,
     *,
     out_dir: Path | None = None,
+    lang: str | None = None,
 ) -> dict:
     """Orchestrator resume-aware. Returns context/block/cost/tokens/from_cache.
 
@@ -406,7 +485,7 @@ def run_prepass(
         raise RuntimeError("no images for context pre-pass")
 
     samples = select_sample_pages(pages)
-    ctx, meta = extract_context(api_key, model, samples, max_tokens)
+    ctx, meta = extract_context(api_key, model, samples, max_tokens, lang=lang)
     block = render_block(ctx)
     save_context(cache_dir, ctx, block)
 

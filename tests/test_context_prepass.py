@@ -102,7 +102,7 @@ def test_strip_json_fence_prose_wrapped():
 # ---------------------------------------------------------------- extract_context
 
 def _patch_post(monkeypatch, content: str):
-    def fake(api_key, model, sample_b64s, max_tokens):
+    def fake(api_key, model, sample_b64s, max_tokens, lang=None):
         return content, {"latency_s": 0.1, "usage": {"prompt_tokens": 100, "completion_tokens": 50}}
     monkeypatch.setattr(context_prepass, "_post_context_once", fake)
 
@@ -139,7 +139,7 @@ def test_extract_context_attaches_filename_labels(tmp_path, monkeypatch):
     LLM cần nhãn tên để trả cover_page; assert sample_b64s mang đúng filename."""
     captured = {}
 
-    def fake(api_key, model, sample_b64s, max_tokens):
+    def fake(api_key, model, sample_b64s, max_tokens, lang=None):
         captured["samples"] = sample_b64s
         return _valid_ctx_json(), {"usage": {}}
 
@@ -173,7 +173,7 @@ def test_extract_context_retries_on_parse_fail(tmp_path, monkeypatch):
     Trước fix M1, json.loads nằm NGOÀI retry loop nên parse-fail raise luôn."""
     calls = {"n": 0}
 
-    def fake(api_key, model, sample_b64s, max_tokens):
+    def fake(api_key, model, sample_b64s, max_tokens, lang=None):
         calls["n"] += 1
         if calls["n"] == 1:
             return '{"title": "X", "pages_per', {"usage": {}}  # JSON cắt dở
@@ -191,7 +191,7 @@ def test_extract_context_parse_fail_exhausts_retries(tmp_path, monkeypatch):
     """Parse-fail liên tục → hết retry → raise (không treo vô hạn)."""
     calls = {"n": 0}
 
-    def fake(api_key, model, sample_b64s, max_tokens):
+    def fake(api_key, model, sample_b64s, max_tokens, lang=None):
         calls["n"] += 1
         return "{broken", {"usage": {}}
 
@@ -393,7 +393,7 @@ def test_run_prepass_cache_hit_from_out_dir(tmp_path, monkeypatch):
 def test_cost_accounting(tmp_path, monkeypatch):
     _fake_pages(tmp_path, 20)
 
-    def fake(api_key, model, sample_b64s, max_tokens):
+    def fake(api_key, model, sample_b64s, max_tokens, lang=None):
         return _valid_ctx_json(), {
             "latency_s": 0.1,
             "usage": {"prompt_tokens": 1_000_000, "completion_tokens": 100_000},
@@ -415,7 +415,7 @@ def test_prompt_context_threading(tmp_path, monkeypatch):
     """ocr_page(prompt_context='BLOCK') → text = PROMPT + '\\n\\n' + BLOCK, base byte-for-byte."""
     captured = {}
 
-    def fake_post(api_key, model, image_b64, mime, max_tokens, prompt_context=""):
+    def fake_post(api_key, model, image_b64, mime, max_tokens, prompt_context="", lang=None):
         text = ocr.PROMPT + ("\n\n" + prompt_context if prompt_context else "")
         captured["text"] = text
         return "md", {"latency_s": 0.1, "usage": {}}
@@ -431,7 +431,7 @@ def test_prompt_context_threading(tmp_path, monkeypatch):
 def test_prompt_context_empty_unchanged(tmp_path, monkeypatch):
     captured = {}
 
-    def fake_post(api_key, model, image_b64, mime, max_tokens, prompt_context=""):
+    def fake_post(api_key, model, image_b64, mime, max_tokens, prompt_context="", lang=None):
         captured["text"] = ocr.PROMPT + ("\n\n" + prompt_context if prompt_context else "")
         return "md", {"latency_s": 0.1, "usage": {}}
 

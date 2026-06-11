@@ -77,6 +77,53 @@ CHỈ output Markdown. KHÔNG giải thích, KHÔNG ```markdown wrapper, KHÔNG 
 """
 
 
+# Prompt OCR riêng cho sách tiếng NHẬT (dọc, đọc phải→trái). KHÔNG dùng quy tắc dấu
+# tiếng Việt. Nguồn thường là ẢNH CHỤP MÀN HÌNH app đọc (Kindle…) → có thanh menu hệ
+# điều hành + header/footer app + dock; phải BỎ QUA, chỉ lấy vùng chữ thật của sách.
+JA_PROMPT = """You are an OCR engine for JAPANESE books (novels, essays, literature).
+
+TASK: Extract ALL Japanese book text in this image into clean Markdown.
+
+THE IMAGE IS A SCREENSHOT of a reading app (e.g. Kindle). IGNORE everything that is
+not book body text: the OS menu bar, the app's title/header bar (running book title),
+the footer (reading progress, "N% / N minutes left in chapter", page indicators), the
+dock, window chrome. Transcribe ONLY the book's own text region.
+
+MANDATORY RULES:
+1. Japanese is written VERTICALLY (tategaki) and read TOP→BOTTOM, then columns
+   RIGHT→LEFT. Read each column top to bottom; move to the NEXT column to the LEFT.
+2. TWO-PAGE SPREAD (landscape image, two separate text blocks with a gutter in the
+   middle): this is right-to-left reading order — read the RIGHT page fully FIRST,
+   then the LEFT page. Concatenate into continuous text.
+3. Reproduce the text EXACTLY as printed: kanji, hiragana, katakana, punctuation
+   (。、「」『』…—), and ruby/furigana base text. Do NOT translate, do NOT romanize,
+   do NOT modernize kanji. Proper names and foreign words: copy exactly as printed.
+4. Furigana (small reading glosses beside kanji): transcribe the MAIN kanji text; you
+   may drop the furigana gloss (it is a pronunciation aid, not body text).
+5. Chapter/section titles: use `## `.
+6. Paragraphs: separate with a blank line. Do NOT hard-wrap inside a paragraph — join
+   a paragraph's lines/columns into one continuous line.
+7. Skip running headers/footers (book/chapter title repeated at the page edge) and
+   page numbers.
+
+Output Markdown ONLY. No explanation, no ```markdown wrapper, no extra comments.
+"""
+
+
+# Registry prompt OCR theo ngôn ngữ. `lang` (từ metadata.json / --lang) chọn prompt;
+# thiếu/không khớp → fallback PROMPT tiếng Việt (mặc định, verified artifact). Base
+# PROMPT (vi) GIỮ NGUYÊN byte-for-byte; ngôn ngữ mới = THÊM entry, không sửa vi.
+PROMPTS: dict[str, str] = {
+    "vi": PROMPT,
+    "ja": JA_PROMPT,
+}
+
+
+def prompt_for_lang(lang: str | None) -> str:
+    """Chọn base prompt OCR theo lang. Lạ/None → PROMPT tiếng Việt (mặc định)."""
+    return PROMPTS.get((lang or "vi").strip().lower(), PROMPT)
+
+
 @dataclass
 class PageResult:
     page_path: Path
@@ -118,12 +165,14 @@ def _post_once(
     mime: str,
     max_tokens: int,
     prompt_context: str = "",
+    lang: str | None = None,
 ) -> tuple[str, dict]:
     """1 lần POST, không retry. Raises trên HTTP/parse error với body context.
 
     `prompt_context` (block bối cảnh sách từ context pre-pass) được append vào base
-    PROMPT khi non-empty. Base PROMPT giữ nguyên byte-for-byte."""
-    text = PROMPT + ("\n\n" + prompt_context if prompt_context else "")
+    prompt khi non-empty. `lang` chọn base prompt (vi mặc định, ja cho sách Nhật);
+    base prompt mỗi ngôn ngữ giữ nguyên byte-for-byte."""
+    text = prompt_for_lang(lang) + ("\n\n" + prompt_context if prompt_context else "")
     payload = {
         "model": model,
         "messages": [
@@ -211,19 +260,20 @@ def ocr_page(
     retries: int = 4,
     max_tokens: int = 12000,
     prompt_context: str = "",
+    lang: str | None = None,
 ) -> tuple[str, dict]:
     """Single page OCR với retry exponential backoff cho transient error.
 
     Retry trên 429/5xx/timeout/empty content/malformed JSON. Không retry trên
     4xx khác, cũng không retry blank page (empty+finish_reason=stop) — trang
     trống thật, run_batch sẽ ghi placeholder. `prompt_context` từ context pre-pass
-    được thread xuống _post_once."""
+    và `lang` (chọn base prompt) được thread xuống _post_once."""
     image_b64 = _encode_image(image_path)
     mime = _detect_mime(image_path)
     last_exc: Exception | None = None
     for attempt in range(retries + 1):
         try:
-            return _post_once(api_key, model, image_b64, mime, max_tokens, prompt_context)
+            return _post_once(api_key, model, image_b64, mime, max_tokens, prompt_context, lang)
         except RuntimeError as exc:
             last_exc = exc
             if not _is_transient(str(exc)) or attempt == retries:
@@ -277,12 +327,14 @@ def run_batch(
     max_tokens: int = 12000,
     on_event=None,
     prompt_context: str = "",
+    lang: str | None = None,
 ) -> dict:
     """Run OCR batch. Returns summary dict.
 
     `on_event(kind, payload)` — optional callback cho progress logging
     (kind: 'start', 'page_ok', 'page_fail', 'done').
-    `prompt_context` — block bối cảnh sách (context pre-pass) append vào PROMPT mỗi trang."""
+    `prompt_context` — block bối cảnh sách (context pre-pass) append vào base prompt
+    mỗi trang. `lang` chọn base prompt theo ngôn ngữ (vi mặc định, ja cho sách Nhật)."""
     input_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -302,7 +354,8 @@ def run_batch(
     def work(page_path: Path) -> PageResult:
         try:
             md, meta = ocr_page(
-                api_key, model, page_path, max_tokens=max_tokens, prompt_context=prompt_context
+                api_key, model, page_path, max_tokens=max_tokens,
+                prompt_context=prompt_context, lang=lang,
             )
             usage = meta.get("usage", {})
             return PageResult(

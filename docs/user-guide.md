@@ -146,9 +146,15 @@ scan2ebook init chuyen-thu --from ~/Books/book.pdf \
 # Hoặc từ Google Drive file link công khai
 scan2ebook init mybook --from "https://drive.google.com/file/d/1RAGxunS5cgjCM6qbxvHG84gMuWrZ_nOA/view?usp=drivesdk" \
   --title "Tiêu đề sách" --author "Tác giả"
+
+# Sách tiếng Nhật (prose pipeline, kích hoạt OCR dọc + RTL spread handling)
+scan2ebook init japanese-novel --from ~/Books/scans/ \
+  --title "花子物語" --author "田中太郎" --lang ja
 ```
 
 Kết quả: tạo `~/scan2ebook/{slug}/scans/`, copy + natural-sort + rename ảnh từ `--from` thành `page_001.<ext>`..., và ghi `metadata.json` vào `scans/`. Nếu `--from` là PDF (local hoặc Drive link), pipeline render từng trang thành `page_NNN.jpg` rồi đặt vào scans/. HEIC/HEIF file tự động convert→JPG trong quá trình này (EXIF + orientation được giữ nguyên). Override data root bằng `--home`.
+
+**`--lang` parameter**: Đặt ngôn ngữ sách (mặc định `vi` cho tiếng Việt). Pipeline dùng ngôn ngữ để chọn OCR prompt chuyên biệt. `--lang ja` dùng cho sách tiếng Nhật (novels, essays) — kích hoạt OCR dọc (tategaki), đọc phải→trái, bỏ qua chrome app (menu bar, header, footer, dock), và render guidance "đọc trang PHẢI trước rồi trang TRÁI" cho ảnh trang đôi. Lưu ngôn ngữ vào `metadata.json` — lệnh `all` đọc tự động và chọn đúng prompt cho pipeline. **Lưu ý**: `--lang ja` này dành cho OCR prose pipeline (sách dọc thường). Riêng manga dùng lệnh `scan2ebook manga` (pipeline khác, không OCR, fixed-layout).
 
 Bỏ `--from` nếu muốn tự copy ảnh sau (lệnh chỉ tạo folder + metadata mẫu). `metadata.json` đã tồn tại sẽ được giữ nguyên, không ghi đè. Nếu `scans/` đã có file `page_*`, `init --from` sẽ báo lỗi (rc=2) thay vì import — xoá page cũ trước rồi chạy lại, tránh để lại page rác bị OCR nhầm (tốn tiền).
 
@@ -421,6 +427,7 @@ scan2ebook ocr ~/Books-inbox/namphong-q01 ~/output/ocr --json-lines > events.ndj
 | `scan2ebook doctor` | Self-check môi trường (python/pandoc/key/rclone) |
 | `scan2ebook doctor --json` | Self-check, JSON output |
 | `scan2ebook init <slug> --from <dir\|book.pdf\|drive-link>` | Tạo book + scans zone + import ảnh / render PDF / tải Drive + metadata mẫu |
+| `scan2ebook init <slug> --from <dir> --lang ja` | Init với ngôn ngữ Nhật (OCR dọc, RTL spread, vi mặc định) |
 | `scan2ebook manga <slug> --from <dir\|.mobi\|.cbz\|drive-url>` | Build EPUB3 fixed-layout RTL manga (4 input forms); slug = folder name hoặc path |
 | `scan2ebook manga <slug> --series "Pluto" --series-index 2` | Manga với auto series-title (dc:title = "Pluto 02") |
 | `scan2ebook manga <slug> --auto-cover` | Auto-detect bìa qua vision LLM (cần OPENROUTER_API_KEY) |

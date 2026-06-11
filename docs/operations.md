@@ -120,7 +120,7 @@ Khi đổi model, smoke test 10 trang trước khi commit full pipeline. Output 
 
 Prompt OCR ở `src/scan_to_ebook/ocr.py`, biến `PROMPT`. Đã verified zero error trên Nam Phong 1917 với Gemini 3.1 Pro. Đừng đổi nếu không có lý do rõ.
 
-Lý do hợp lệ để tune prompt: ngôn ngữ khác (English, Japanese), genre rất khác (math heavy với LaTeX, music score), layout đặc biệt (newspaper 4 cột).
+Lý do hợp lệ để tune prompt: ngôn ngữ khác (English ngoại trừ Japanese, math heavy với LaTeX, music score), layout đặc biệt (newspaper 4 cột). **Tiếng Nhật là FIRST-CLASS**: dùng `--lang ja` khi init — pipeline sẽ dùng dedicated `JA_PROMPT` (xử lý tategaki/dọc, đọc phải→trái, bỏ qua app chrome), context-prepass `CONTEXT_PROMPT_JA` (phát hiện đúng spread RTL), và post-process chuẩn hóa space-less ATX headings. Không cần manual prompt tuning cho tiếng Nhật.
 
 Quy trình tune. Một là branch riêng. Hai là edit `PROMPT`. Ba là smoke test 10–20 trang trên một cuốn có ground truth (ví dụ `samples/demo-scans/`, hoặc tự build fixture từ sách bạn sở hữu). Bốn là so diff với version cũ qua `git diff` hoặc dùng tool diff trực quan. Năm là chỉ merge khi diff acceptable (không corrupt chữ nào, không drop dấu).
 

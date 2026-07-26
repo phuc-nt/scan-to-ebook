@@ -69,19 +69,16 @@ def _err(msg: str):
     "msg",
     [
         "malformed response (JSON parse): Expecting value: line 167 column 1",
-        "HTTP 429 Too Many Requests",
-        "HTTP 503 Service Unavailable",
         "empty content (finish_reason=None)",
-        "request timed out / network error: The read operation timed out",
     ],
 )
-def test_ocr_page_transient_early_aborts_on_same_error_class(monkeypatch, tmp_path: Path, msg):
-    """Transient được retry, NHƯNG cùng lớp lỗi lặp lại → early-abort sau N lần.
+def test_ocr_page_content_class_early_aborts_on_same_error_class(monkeypatch, tmp_path: Path, msg):
+    """Lỗi CONTENT-class (empty/malformed) lặp cùng lớp → early-abort sau N lần.
 
-    Trang provider trả deterministic (cùng nguyên nhân y hệt mỗi lần) thì retry
-    thêm chỉ tốn thời gian/tiền. Với retries=4 mà lỗi luôn cùng class, abort ở
-    lần thứ _DETERMINISTIC_ABORT_AFTER thay vì chạy hết 5 lần. Đây là fix cho
-    tail-stall (1 trang chết deterministic từng kéo cả cuốn 2h+)."""
+    Provider đọc cùng ảnh trả cùng kết quả hỏng = deterministic thật; retry thêm
+    chỉ tốn thời gian/tiền. Với retries=4 mà lỗi luôn cùng class, abort ở lần thứ
+    _DETERMINISTIC_ABORT_AFTER thay vì chạy hết 5 lần. Đây là fix cho tail-stall
+    (1 trang chết deterministic từng kéo cả cuốn 2h+)."""
     img = tmp_path / "page_1.png"
     img.write_bytes(b"\x89PNG\r\n")
     monkeypatch.setattr(ocr.time, "sleep", lambda *_: None)  # không chờ backoff
@@ -103,6 +100,66 @@ def test_ocr_page_transient_early_aborts_on_same_error_class(monkeypatch, tmp_pa
         f"deterministic same-class phải abort sau {ocr._DETERMINISTIC_ABORT_AFTER} lần, "
         f"got {calls['n']}"
     )
+
+
+@pytest.mark.parametrize(
+    "msg",
+    [
+        "HTTP 429 Too Many Requests",
+        "HTTP 503 Service Unavailable",
+        "request timed out / network error: The read operation timed out",
+    ],
+)
+def test_ocr_page_infra_transient_never_dead_even_when_repeated(monkeypatch, tmp_path: Path, msg):
+    """429/5xx/timeout LẶP CÙNG CLASS vẫn KHÔNG DeadPageError — retry hết vòng rồi
+    raise thường (trang trống, pass sau cứu).
+
+    Bug B2 review 2026-07-26: burst rate-limit / incident provider trả lỗi y hệt
+    nhau trong 1-2s → counter deterministic cũ chôn oan trang nghẽn tạm thành
+    placeholder vĩnh viễn (mất nội dung + phải cứu tay). Lỗi hạ tầng không nói gì
+    về trang → phải hưởng trọn retry budget."""
+    img = tmp_path / "page_1.png"
+    img.write_bytes(b"\x89PNG\r\n")
+    monkeypatch.setattr(ocr.time, "sleep", lambda *_: None)
+
+    calls = {"n": 0}
+
+    def fake_post_once(*_a, **_k):
+        calls["n"] += 1
+        raise _err(msg)
+
+    monkeypatch.setattr(ocr, "_post_once", fake_post_once)
+    with pytest.raises(RuntimeError) as ei:
+        ocr.ocr_page("k", "m", img, retries=3)
+    assert not isinstance(ei.value, ocr.DeadPageError), (
+        f"lỗi hạ tầng lặp lại KHÔNG được thành DeadPageError: {ei.value}"
+    )
+    # Hưởng trọn retry budget: retries=3 → 4 lần gọi, không early-abort.
+    assert calls["n"] == 4, f"phải retry hết vòng (4 lần), got {calls['n']}"
+
+
+@pytest.mark.parametrize("marker", ["data_inspection_failed", "image format is illegal"])
+def test_ocr_page_moderation_400_dead_on_first_attempt(monkeypatch, tmp_path: Path, marker):
+    """HTTP 400 moderation/định-dạng-ảnh → DeadPageError NGAY lần đầu (1 call).
+
+    Bug B1 review 2026-07-26: fix C1 scope placeholder về DeadPageError nhưng 400
+    moderation là non-transient → raise thường → không placeholder → trang kẹt todo
+    vĩnh viễn → mọi pass `all` fail>0 → sách KHÔNG BAO GIỜ build được (WARN loop).
+    400 content-deterministic phải dead ngay: retry cùng ảnh không bao giờ khác."""
+    img = tmp_path / "page_1.png"
+    img.write_bytes(b"\x89PNG\r\n")
+    monkeypatch.setattr(ocr.time, "sleep", lambda *_: None)
+
+    calls = {"n": 0}
+
+    def fake_post_once(*_a, **_k):
+        calls["n"] += 1
+        raise _err(f'HTTP 400 Bad Request: {{"error":{{"code":"{marker}","message":"..."}}}}')
+
+    monkeypatch.setattr(ocr, "_post_once", fake_post_once)
+    with pytest.raises(ocr.DeadPageError):
+        ocr.ocr_page("k", "m", img, retries=4)
+    assert calls["n"] == 1, f"400 deterministic phải dead ngay lần 1, got {calls['n']}"
 
 
 def test_ocr_page_transient_varying_class_retries_to_exhaustion(monkeypatch, tmp_path: Path):
@@ -255,6 +312,35 @@ def test_run_batch_writes_dead_placeholder_and_next_pass_skips(monkeypatch, tmp_
     assert total == 1
     assert todo == [], f"trang dead phải bị skip pass sau, còn todo: {todo}"
     # list_dead_pages phát hiện đúng trang để pipeline la to trước khi build.
+    assert ocr.list_dead_pages(out) == ["page_1"]
+
+
+def test_run_batch_moderation_400_writes_placeholder_and_next_pass_skips(monkeypatch, tmp_path: Path):
+    """End-to-end qua ocr_page THẬT: 400 data_inspection_failed → placeholder →
+    pass sau skip → sách build được (trang tính fail, list_dead_pages thấy).
+
+    Đây là kịch bản batch3 thật (4 trang / 3 cuốn bị moderation chặn); code sau fix
+    C1 từng để các cuốn đó WARN loop vô hạn."""
+    inbox = tmp_path / "scans"
+    inbox.mkdir()
+    out = tmp_path / "out"
+    (inbox / "page_1.png").write_bytes(b"\x89PNG\r\n")
+    monkeypatch.setattr(ocr.time, "sleep", lambda *_: None)
+
+    def fake_post_once(*_a, **_k):
+        raise _err('HTTP 400 Bad Request: {"error":{"code":"data_inspection_failed"}}')
+
+    monkeypatch.setattr(ocr, "_post_once", fake_post_once)
+    summary = ocr.run_batch(
+        api_key="k", input_dir=inbox, output_dir=out,
+        model="m", workers=1, pattern="*.png",
+    )
+    assert summary["fail"] == 1, f"trang moderation vẫn tính fail: {summary}"
+    md = out / "page_1.md"
+    assert md.exists() and "OCR FAILED" in md.read_text(encoding="utf-8")
+    # Pass sau: placeholder size>0 → skip, sách build được thay vì kẹt todo mãi.
+    todo, _ = ocr.collect_pending_pages(inbox, "*.png", out, None)
+    assert todo == [], f"trang moderation phải bị skip pass sau: {todo}"
     assert ocr.list_dead_pages(out) == ["page_1"]
 
 

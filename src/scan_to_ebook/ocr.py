@@ -66,13 +66,15 @@ _DETERMINISTIC_ABORT_AFTER = 2
 
 
 class DeadPageError(RuntimeError):
-    """Trang fail DETERMINISTIC (cùng error class lặp liên tiếp) — loại DUY NHẤT
-    được ghi DEAD_PLACEHOLDER để pass sau skip.
+    """Trang fail DETERMINISTIC — loại DUY NHẤT được ghi DEAD_PLACEHOLDER để pass
+    sau skip. Hai đường vào: (1) lỗi content-class (empty/malformed) lặp cùng class
+    liên tiếp; (2) HTTP 400 moderation/định-dạng-ảnh (_DEAD_400_MARKERS) ngay lần đầu.
 
     Tách class riêng vì scope placeholder phải HẸP: fail vì 402 (hết credit),
-    403/401 (config), hay transient hết vòng retry (nghẽn tạm) đều PHẢI để trang
-    trống cho pass sau / lần chạy lại OCR tiếp — placeholder hoá chúng là mất
-    nội dung vĩnh viễn mà mọi tín hiệu downstream (fail=0, verify OK) vẫn xanh."""
+    403/401 (config), hay 429/5xx/timeout (hạ tầng — kể cả lặp cùng class trong
+    burst) đều PHẢI để trang trống cho pass sau / lần chạy lại OCR tiếp —
+    placeholder hoá chúng là mất nội dung vĩnh viễn mà mọi tín hiệu downstream
+    (fail=0, verify OK) vẫn xanh."""
 
 _NUM_RE = re.compile(r"\d+")
 
@@ -302,6 +304,33 @@ def _is_transient(msg: str) -> bool:
     ) and _BLANK_MARKER not in msg
 
 
+# HTTP 400 mang các marker này = lỗi DETERMINISTIC theo NỘI DUNG ảnh: provider
+# moderation chặn ảnh (data_inspection_failed — sách chiến tranh/lịch sử hay dính)
+# hoặc ảnh sai định dạng. Retry CÙNG ảnh không bao giờ khác kết quả → DeadPageError
+# ngay lần đầu (placeholder → pass sau skip → sách VẪN build được, trang tính fail).
+# Không có nhánh này, trang kẹt `todo` vĩnh viễn → mọi pass `all` fail>0 → không bao
+# giờ ra EPUB (WARN loop vô hạn trong batch — review 2026-07-26 B1). HTTP 400 KHÁC
+# (không marker) vẫn fail thường: không đoán bừa nguyên nhân.
+_DEAD_400_MARKERS = ("data_inspection_failed", "image format is illegal")
+
+
+def _is_dead_400(msg: str) -> bool:
+    """HTTP 400 content-deterministic (moderation / định dạng ảnh) → đáng DeadPageError."""
+    return "HTTP 400" in msg and any(m in msg for m in _DEAD_400_MARKERS)
+
+
+def _counts_as_deterministic(msg: str) -> bool:
+    """Lỗi được phép ĐẾM vào early-abort deterministic: CHỈ content-class.
+
+    'empty content (finish_reason=…)' / 'malformed response': provider đọc cùng ảnh
+    trả cùng kết quả hỏng → lặp class = deterministic thật, abort sớm hợp lý.
+    429/5xx/timeout là lỗi HẠ TẦNG: burst rate-limit / incident / nghẽn trả lỗi y hệt
+    nhau trong 1-2s nên "cùng class 2 lần" KHÔNG chứng minh trang hỏng — phải hưởng
+    trọn retry budget và không bao giờ DeadPageError (trang nghẽn tạm bị placeholder
+    hoá = mất nội dung vĩnh viễn — review 2026-07-26 B2)."""
+    return "empty content" in msg or "malformed response" in msg
+
+
 def ocr_page(
     api_key: str,
     model: str,
@@ -328,18 +357,30 @@ def ocr_page(
         except RuntimeError as exc:
             last_exc = exc
             msg = str(exc)
+            # HTTP 400 content-deterministic (moderation chặn ảnh / định dạng ảnh):
+            # retry cùng ảnh không bao giờ khác → DeadPageError NGAY lần đầu để
+            # run_batch ghi placeholder (sách vẫn build, trang tính fail). 401/402/403
+            # và 400 khác vẫn raise thường (trang trống cho pass sau) — xem docstring
+            # DeadPageError.
+            if _is_dead_400(msg):
+                raise DeadPageError(msg) from exc
             if not _is_transient(msg) or attempt == retries:
                 raise
-            # Early-abort: cùng lớp lỗi lặp lại _DETERMINISTIC_ABORT_AFTER lần → trang
-            # deterministic-fail (provider trả rỗng/malformed y hệt), retry thêm vô ích.
-            # Raise DeadPageError (KHÔNG phải RuntimeError thường) để run_batch biết
-            # đây là loại duy nhất đáng ghi placeholder; 402/403/hết-retry raise thường
-            # → trang vẫn trống → pass sau / chạy lại sau nạp credit sẽ OCR tiếp.
-            cls = _error_class(msg)
-            same_class_count = same_class_count + 1 if cls == prev_class else 1
-            prev_class = cls
-            if same_class_count >= _DETERMINISTIC_ABORT_AFTER:
-                raise DeadPageError(msg) from exc
+            # Early-abort: CHỈ lỗi content-class (empty/malformed) được đếm — cùng lớp
+            # lặp _DETERMINISTIC_ABORT_AFTER lần → trang deterministic-fail, retry thêm
+            # vô ích → DeadPageError (run_batch ghi placeholder). 429/5xx/timeout là
+            # hạ tầng (burst trả lỗi y hệt trong 1-2s): KHÔNG đếm, hưởng trọn retry;
+            # hết vòng raise thường → trang trống, pass sau cứu.
+            if _counts_as_deterministic(msg):
+                cls = _error_class(msg)
+                same_class_count = same_class_count + 1 if cls == prev_class else 1
+                prev_class = cls
+                if same_class_count >= _DETERMINISTIC_ABORT_AFTER:
+                    raise DeadPageError(msg) from exc
+            else:
+                # Lỗi hạ tầng xen giữa: reset streak — không để 1 lần empty trước đó
+                # + 1 lần empty sau chuỗi 429 bị ghép thành "2 lần liên tiếp".
+                prev_class, same_class_count = None, 0
             wait = 2 ** attempt + (attempt * 0.5)  # 1, 2.5, 5s
             time.sleep(wait)
     assert last_exc is not None

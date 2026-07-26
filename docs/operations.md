@@ -219,9 +219,17 @@ Mỗi cuốn một book-home chuẩn của pipeline, gom dưới 1 thư mục g�
 
 ### Bước 1 — Chạy nhóm bằng N-lane parallel driver
 
-Nguyên tắc driver (script tham số hoá sẽ có ở `tools/batch_ocr_runner.py`):
+```bash
+OPENROUTER_API_KEY=sk-... nohup python3 tools/batch_ocr_runner.py \
+  --csv <BATCH_ROOT>/group1.csv --home <BATCH_ROOT>/books \
+  --log-dir <BATCH_ROOT>/logs --lanes 8 --workers 24 --dpi 72 \
+  > <BATCH_ROOT>/group1-run.log 2>&1 &
+```
+
+Nguyên tắc thiết kế (`tools/batch_ocr_runner.py --help` tự đủ):
 - N lane rút sách từ **1 queue chung** → không cuốn nào bị 2 lane đụng (không collision file).
-- Mỗi cuốn: `init --from <pdf> --dpi 72 --author --title` (skip nếu đã có scans) → `all --yes --workers 24` × 2 pass, giữa 2 pass chạy `ocr` retry pass.
+- Mỗi cuốn: `init --from <pdf> --dpi 72 --author --title` (skip nếu đã có scans) → `all --yes` × 2 pass, giữa 2 pass chạy `ocr` retry (tự nạp context cache); pass `all` cuối tự bỏ pre-pass khi 0 trang cần OCR → sách bị moderation chặn ảnh mẫu vẫn tự ra EPUB.
+- Kết quả phân loại rõ: `DONE | WARN(no-epub) | WARN(init-fail) | STOP(402)` — không còn WARN hộp đen.
 - **8 lane × 24 worker = 192 concurrent trên 1 key là an toàn** — verified: 34 cuốn / ~14.6k trang trong 79 phút, speedup 7.2x, chỉ 2 lần 429 lẻ. `qwen3.7-plus` không throttle ở mức này.
 - **`--dpi 72` khi scan nguồn ~1024px**: default 150 DPI upscale 2× vô ích, đắt hơn ~12%.
 - **HTTP 402 ở bất cứ lane nào → dừng nhận việc mới.** 402 = hết credit (KHÔNG phải lỗi sách). Nạp credit rồi rerun — OCR cache khiến resume chỉ làm trang còn thiếu, trang xong = $0.
@@ -248,7 +256,13 @@ scan2ebook verify books/<slug>              # 1 cuốn
 
 ### Bước 3 — Dọn TOC rác + rebuild cuốn bị đổi
 
-OCR biến trang "MỤC LỤC" của sách thành heading (pandoc tự sinh TOC → trùng) + chữ trên bìa thành `## <title>`/`## <author>`. Dọn an toàn: xoá block MỤC LỤC + hạ heading title/author **chỉ khi body rỗng** (heading trùng title NHƯNG có prose sau = chương thật, vd tuyển tập đặt tên theo 1 truyện — đừng xoá). Backup `.bak`, rebuild CHỈ các cuốn bị đổi ($0). Script tham số hoá: `tools/fix_toc_junk.py`.
+```bash
+python3 tools/fix_toc_junk.py --home <BATCH_ROOT>/books --csv group1.csv
+# in danh sách SLUGS đã sửa → rebuild CHỈ các cuốn đó ($0):
+SCAN2EBOOK_HOME=<BATCH_ROOT>/books scan2ebook all <slug> --yes
+```
+
+OCR biến trang "MỤC LỤC" của sách thành heading (pandoc tự sinh TOC → trùng) + chữ trên bìa thành `## <title>`/`## <author>`. Tool dọn CHỈ 2 loại chắc chắn an toàn: xoá block MỤC LỤC + hạ heading title/author **khi body rỗng thật** (heading trùng title NHƯNG có prose sau = chương thật, vd tuyển tập đặt tên theo 1 truyện — không đụng). Backup `.bak` cạnh book.md.
 
 ### Lưu ý về cost
 

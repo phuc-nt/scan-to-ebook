@@ -12,8 +12,10 @@ Thiết kế (đã verify trên đợt thực tế ~180 cuốn / 41k trang):
 - HTTP 402 (hết credit) ở bất kỳ lane nào → ngừng nhận sách mới (sách đang chạy
   kết thúc tự nhiên). 402 KHÔNG phải lỗi sách: nạp credit rồi chạy lại, OCR
   cache làm trang xong = $0.
-- Kết quả cuối phân loại: DONE | WARN(no-epub) | WARN(init-fail) | STOP(402),
-  kèm wall-clock, tổng thời gian tuần tự, speedup, số lần 429.
+- Kết quả cuối phân loại: DONE | DONE(dead=N) | WARN(no-epub) | WARN(init-fail)
+  | STOP(402), kèm wall-clock, tổng thời gian tuần tự, speedup, số lần 429.
+  DONE(dead=N) = EPUB build được nhưng thiếu N trang (dead placeholder) — liệt kê
+  ở "Cần xem" để không bị batch "xanh" che mất.
 
 CSV cần cột: `slug,title,authors,pdf_path` (cột khác bỏ qua; field chứa dấu
 phẩy phải quote chuẩn CSV). Ví dụ:
@@ -68,13 +70,19 @@ def read_api_key(env_file: pathlib.Path | None) -> str:
     return key
 
 
-def classify_result(ok: bool, init_failed: bool, hit_402: bool) -> str:
-    """Nhãn kết quả 1 cuốn — WARN không còn là hộp đen."""
+def classify_result(ok: bool, init_failed: bool, hit_402: bool, dead: int = 0) -> str:
+    """Nhãn kết quả 1 cuốn — WARN không còn là hộp đen.
+
+    `dead` > 0 và có EPUB → `DONE(dead=N)`: sách BUILD ĐƯỢC nhưng thiếu N trang
+    (dead placeholder vô hình trong EPUB). Không phân biệt thì batch "xanh" che mất
+    sách thiếu ruột — từng phải quét tay 250 cuốn vì gap này (review 2026-07-26 B7)."""
     if hit_402:
         return "STOP(402)"
     if init_failed:
         return "WARN(init-fail)"
-    return "DONE" if ok else "WARN(no-epub)"
+    if not ok:
+        return "WARN(no-epub)"
+    return f"DONE(dead={dead})" if dead > 0 else "DONE"
 
 
 def count_429(*log_files: pathlib.Path) -> int:
@@ -84,6 +92,20 @@ def count_429(*log_files: pathlib.Path) -> int:
         if lf.exists():
             n += len(re.findall(r"(?<![\d.])429\b|rate.?limit", lf.read_text(errors="replace"), re.I))
     return n
+
+
+def count_dead(*log_files: pathlib.Path) -> int:
+    """Số trang DEAD placeholder theo cảnh báo build-time của `all` trong log.
+
+    `all` in "⚠ N trang DEAD placeholder ..." (stderr → gộp vào log) với N CỘNG DỒN
+    tại thời điểm build → lấy match CUỐI CÙNG theo thứ tự log (pass cuối = chốt)."""
+    dead = 0
+    for lf in log_files:
+        if lf.exists():
+            matches = re.findall(r"(\d+) trang DEAD placeholder", lf.read_text(errors="replace"))
+            if matches:
+                dead = int(matches[-1])
+    return dead
 
 
 # ---------------------------------------------------------------- runner
@@ -147,7 +169,7 @@ class BatchRunner:
                            "--workers", self.workers], retry_log)
 
         secs = time.monotonic() - t0
-        label = classify_result(epub.exists(), init_failed, hit_402)
+        label = classify_result(epub.exists(), init_failed, hit_402, count_dead(*log_files))
         with self.lock:
             self.results.append((slug, lane, label, secs, count_429(*log_files)))
             print(f"[lane{lane}] {label} {slug} {secs:.0f}s", flush=True)
@@ -217,7 +239,9 @@ def main(argv: list[str] | None = None) -> int:
         print("Cần xem: " + ", ".join(f"{s}[{lb}]" for s, _, lb, _, _ in warns), flush=True)
         print("Gợi ý: WARN(no-epub) → chạy lại `scan2ebook all <slug> --yes` "
               "(0-todo tự bỏ pre-pass); WARN(init-fail) → xem log init; "
-              "STOP(402) → nạp credit rồi chạy lại toàn bộ (cache = $0).", flush=True)
+              "STOP(402) → nạp credit rồi chạy lại toàn bộ (cache = $0); "
+              "DONE(dead=N) → EPUB có nhưng THIẾU N trang — muốn cứu: xoá "
+              "work/ocr/<trang>.md rồi rerun `all --yes` (danh sách trang trong log).", flush=True)
     return 0 if len(done) == len(runner.results) else 1
 
 

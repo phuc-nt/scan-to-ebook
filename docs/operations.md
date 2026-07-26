@@ -229,7 +229,8 @@ OPENROUTER_API_KEY=sk-... nohup python3 tools/batch_ocr_runner.py \
 Nguyên tắc thiết kế (`tools/batch_ocr_runner.py --help` tự đủ):
 - N lane rút sách từ **1 queue chung** → không cuốn nào bị 2 lane đụng (không collision file).
 - Mỗi cuốn: `init --from <pdf> --dpi 72 --author --title` (skip nếu đã có scans) → `all --yes` × 2 pass, giữa 2 pass chạy `ocr` retry (tự nạp context cache); pass `all` cuối tự bỏ pre-pass khi 0 trang cần OCR → sách bị moderation chặn ảnh mẫu vẫn tự ra EPUB.
-- Kết quả phân loại rõ: `DONE | WARN(no-epub) | WARN(init-fail) | STOP(402)` — không còn WARN hộp đen.
+- Kết quả phân loại rõ: `DONE | DONE(dead=N) | WARN(no-epub) | WARN(init-fail) | STOP(402)` — không còn WARN hộp đen. `DONE(dead=N)` = EPUB build được nhưng THIẾU N trang (dead placeholder vô hình trong EPUB); muốn cứu: xoá `work/ocr/<trang>.md` rồi rerun `all --yes` (danh sách trang trong log `all` cuối).
+- **Circuit breaker 402 trong 1 cuốn**: trang đầu tiên dính 402 → các trang còn lại của cuốn bỏ qua tại chỗ (không bắn call chết từng trang), để trống cho lần resume sau nạp credit.
 - **8 lane × 24 worker = 192 concurrent trên 1 key là an toàn** — verified: 34 cuốn / ~14.6k trang trong 79 phút, speedup 7.2x, chỉ 2 lần 429 lẻ. `qwen3.7-plus` không throttle ở mức này.
 - **`--dpi 72` khi scan nguồn ~1024px**: default 150 DPI upscale 2× vô ích, đắt hơn ~12%.
 - **HTTP 402 ở bất cứ lane nào → dừng nhận việc mới.** 402 = hết credit (KHÔNG phải lỗi sách). Nạp credit rồi rerun — OCR cache khiến resume chỉ làm trang còn thiếu, trang xong = $0.

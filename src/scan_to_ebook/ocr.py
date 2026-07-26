@@ -15,6 +15,7 @@ import base64
 import json
 import os
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -489,7 +490,24 @@ def run_batch(
     ok_count = fail_count = blank_count = 0
     failures: list[tuple[str, str]] = []
 
+    # Circuit breaker 402: credit cạn giữa cuốn → MỌI call còn lại chắc chắn fail
+    # 402 (fail-fast nhưng vẫn là 1 HTTP round-trip vô ích × hàng trăm trang × N lane
+    # cùng wind-down = hàng nghìn call chết dội API — review 2026-07-26 B3). Trang
+    # đầu tiên dính 402 set event; trang chưa gọi API bỏ qua tại chỗ, để trống →
+    # resume sau nạp credit OCR tiếp như thường. Message giữ "HTTP 402 Payment
+    # Required" để batch driver grep log vẫn nhận diện STOP(402).
+    credit_dead = threading.Event()
+
     def work(page_path: Path) -> PageResult:
+        if credit_dead.is_set():
+            return PageResult(
+                page_path=page_path,
+                markdown=None,
+                latency_s=0,
+                prompt_tokens=0,
+                completion_tokens=0,
+                error="HTTP 402 Payment Required — bỏ qua không gọi API (credit đã cạn trong batch)",
+            )
         try:
             md, meta = ocr_page(
                 api_key, model, page_path, max_tokens=max_tokens,
@@ -506,6 +524,8 @@ def run_batch(
             )
         except Exception as exc:
             msg = str(exc)
+            if "HTTP 402" in msg:
+                credit_dead.set()  # trang sau bỏ qua tại chỗ, không bắn call chết
             if _BLANK_MARKER in msg:
                 # Trang trống thật: ghi placeholder, đánh dấu blank (không phải fail).
                 return PageResult(

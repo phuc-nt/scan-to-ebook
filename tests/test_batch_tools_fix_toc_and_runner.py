@@ -134,6 +134,35 @@ def test_classify_result_matrix(ok, init_failed, hit_402, expected):
     assert runner.classify_result(ok, init_failed, hit_402) == expected
 
 
+@pytest.mark.parametrize(
+    "ok,init_failed,hit_402,dead,expected",
+    [
+        (True, False, False, 3, "DONE(dead=3)"),   # EPUB có nhưng thiếu 3 trang → nhãn riêng
+        (True, False, False, 0, "DONE"),            # dead=0 giữ nhãn cũ
+        (False, False, False, 3, "WARN(no-epub)"),  # không EPUB → dead không đổi nhãn
+        (True, False, True, 3, "STOP(402)"),        # 402 vẫn thắng
+    ],
+)
+def test_classify_result_dead_pages(ok, init_failed, hit_402, dead, expected):
+    """B7 review 2026-07-26: sách build kèm dead placeholder từng label DONE trơn —
+    batch 'xanh' che sách thiếu ruột, phải quét tay 250 cuốn mới thấy."""
+    assert runner.classify_result(ok, init_failed, hit_402, dead) == expected
+
+
+def test_count_dead_takes_last_match_across_logs(tmp_path):
+    """Lấy match CUỐI theo thứ tự log (pass build cuối = số chốt); log thiếu bỏ qua."""
+    a = tmp_path / "slug-all-1.log"
+    a.write_text("⚠ 5 trang DEAD placeholder (OCR FAILED, THIẾU nội dung): page_1\n", encoding="utf-8")
+    b = tmp_path / "slug-all-2.log"
+    b.write_text("ok\n⚠ 3 trang DEAD placeholder (OCR FAILED, THIẾU nội dung): page_2\n", encoding="utf-8")
+    missing = tmp_path / "khong-ton-tai.log"
+    assert runner.count_dead(a, b, missing) == 3
+    assert runner.count_dead(missing) == 0
+    clean = tmp_path / "clean.log"
+    clean.write_text("DONE, khong canh bao\n", encoding="utf-8")
+    assert runner.count_dead(clean) == 0
+
+
 def test_read_api_key_from_env_file(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     envf = tmp_path / "creds.env"

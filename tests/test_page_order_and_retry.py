@@ -368,3 +368,37 @@ def test_run_batch_non_deterministic_fail_leaves_page_blank(monkeypatch, tmp_pat
     # Trang vẫn trong todo pass sau → chạy lại sau nạp credit sẽ OCR tiếp.
     todo, _ = ocr.collect_pending_pages(inbox, "*.png", out, None)
     assert [p.stem for p in todo] == ["page_1"]
+
+
+def test_run_batch_402_circuit_breaker_skips_remaining_pages(monkeypatch, tmp_path: Path):
+    """402 ở 1 trang → các trang CHƯA gọi API bị bỏ qua tại chỗ (không bắn call chết).
+
+    B3 review 2026-07-26: credit cạn giữa cuốn, mọi trang còn lại vẫn bắn mỗi trang
+    1 call chắc-chắn-402 — hàng trăm trang × N lane wind-down = hàng nghìn call vô
+    ích dội API. Circuit breaker: trang đầu dính 402 set event, trang sau skip local.
+    Trang skip vẫn tính fail + để TRỐNG (resume sau nạp credit OCR tiếp)."""
+    inbox = tmp_path / "scans"
+    inbox.mkdir()
+    out = tmp_path / "out"
+    for i in (1, 2, 3):
+        (inbox / f"page_{i}.png").write_bytes(b"\x89PNG\r\n")
+
+    calls = {"n": 0}
+
+    def fail_402(*_a, **_k):
+        calls["n"] += 1
+        raise RuntimeError("HTTP 402 Payment Required")
+
+    monkeypatch.setattr(ocr, "ocr_page", fail_402)
+    summary = ocr.run_batch(
+        api_key="k", input_dir=inbox, output_dir=out,
+        model="m", workers=1, pattern="*.png",
+    )
+    # workers=1 tuần tự: trang 1 gọi API dính 402 → trang 2, 3 skip không gọi.
+    assert calls["n"] == 1, f"chỉ trang đầu được gọi API, got {calls['n']}"
+    assert summary["fail"] == 3, "trang skip vẫn tính fail (chưa OCR xong)"
+    # Không trang nào bị placeholder → cả 3 còn nguyên todo cho lần chạy sau.
+    todo, _ = ocr.collect_pending_pages(inbox, "*.png", out, None)
+    assert [p.stem for p in todo] == ["page_1", "page_2", "page_3"]
+    # Message trang skip vẫn chứa "402 Payment" để batch driver grep log nhận diện.
+    assert all("402" in err for _, err in summary["failures"])

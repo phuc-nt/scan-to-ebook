@@ -408,7 +408,7 @@ Mực mờ (sách cũ): tăng exposure +1 stop khi scan. Vision model tolerate m
 
 Trang trống (bìa, divider): để nguyên trong inbox. Pipeline tự nhận diện trang trống thật (response rỗng + `finish_reason=stop`) và ghi placeholder `<!-- blank page -->`, **không cần can thiệp tay**, không tính là fail.
 
-Trang chết (provider trả lỗi y hệt mỗi lần retry): pipeline early-abort và ghi placeholder `<!-- OCR FAILED (deterministic) — cần xử lý tay: ... -->` để các lần chạy sau không OCR lại vô ích. Trang vẫn đếm là fail trong summary. Cả 2 loại placeholder là HTML comment nên **vô hình trong EPUB**. Muốn thử cứu trang: xoá file `work/ocr/page_NNN.md` tương ứng rồi rerun — chỉ trang đó bị OCR lại.
+Trang chết (provider trả lỗi Y HỆT mỗi lần retry — deterministic): pipeline early-abort và ghi placeholder `<!-- OCR FAILED (deterministic) — cần xử lý tay: ... -->` để các lần chạy sau không OCR lại vô ích. CHỈ loại deterministic này bị placeholder — fail vì hết credit (402), lỗi config (403), hay nghẽn tạm hết vòng retry thì trang vẫn để trống, chạy lại sẽ OCR tiếp. Trang chết vẫn đếm là fail trong summary, và khi build `all` sẽ **cảnh báo to danh sách trang thiếu nội dung** (cả trong JSON qua `dead_pages`). Cả 2 loại placeholder là HTML comment nên **vô hình trong EPUB**. Muốn thử cứu trang: xoá file `work/ocr/page_NNN.md` tương ứng rồi rerun — chỉ trang đó bị OCR lại.
 
 ## Scripting & JSON output
 

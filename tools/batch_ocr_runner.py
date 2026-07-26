@@ -78,10 +78,11 @@ def classify_result(ok: bool, init_failed: bool, hit_402: bool) -> str:
 
 
 def count_429(*log_files: pathlib.Path) -> int:
+    # (?<![\d.]) chặn khớp nhầm '429' trong số thập phân của dòng cost (vd 0.429).
     n = 0
     for lf in log_files:
         if lf.exists():
-            n += len(re.findall(r"\b429\b|rate.?limit", lf.read_text(errors="replace"), re.I))
+            n += len(re.findall(r"(?<![\d.])429\b|rate.?limit", lf.read_text(errors="replace"), re.I))
     return n
 
 
@@ -196,6 +197,15 @@ def main(argv: list[str] | None = None) -> int:
     print("\n===== KẾT QUẢ =====", flush=True)
     for slug, lane, label, secs, r429 in runner.results:
         print(f"  lane{lane} {slug}: {label} {secs:.0f}s 429={r429}", flush=True)
+    # Sách còn trong queue khi stop (402) — phải liệt kê, không thì "tàng hình".
+    not_started = []
+    while True:
+        try:
+            not_started.append(q.get_nowait()["slug"])
+        except queue.Empty:
+            break
+    if not_started:
+        print(f"CHƯA CHẠY ({len(not_started)} cuốn, dừng vì 402): {', '.join(not_started)}", flush=True)
     done = [x for x in runner.results if x[2] == "DONE"]
     sum_secs = sum(x[3] for x in runner.results)
     print(f"wall-clock = {wall:.0f}s | tổng tuần tự = {sum_secs:.0f}s"

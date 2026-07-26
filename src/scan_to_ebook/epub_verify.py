@@ -42,7 +42,9 @@ def _check_epub(path: Path) -> tuple[str, int]:
         with zipfile.ZipFile(path) as zf:
             if zf.testzip() is not None:
                 return "BADZIP", size
-    except zipfile.BadZipFile:
+    # OSError (permission/IO) và NotImplementedError (compression lạ) cũng là
+    # "không đọc được như zip lành" → BADZIP, không traceback giữa batch.
+    except (zipfile.BadZipFile, OSError, NotImplementedError):
         return "BADZIP", size
     return "OK", size
 

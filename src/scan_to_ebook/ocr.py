@@ -58,9 +58,21 @@ _BLANK_MARKER = "blank page (empty + finish_reason=stop)"
 # lại đủ vòng retry. Placeholder có size>0 nên collect_pending_pages skip; text nêu rõ
 # lỗi + "cần xử lý tay" để người sửa sau (hiếm). Trang vẫn tính là FAIL, không phải ok.
 DEAD_PLACEHOLDER = "<!-- OCR FAILED (deterministic) — cần xử lý tay: {reason} -->"
+# Prefix nhận diện dead-placeholder khi quét lại (pipeline cảnh báo trước khi build).
+DEAD_PREFIX = "<!-- OCR FAILED (deterministic)"
 # Số lần lặp lại CÙNG error class trong 1 ocr_page call thì abort sớm (khỏi đợi hết
 # retries). Trang provider trả deterministic thì retry thêm chỉ tốn thời gian + tiền.
 _DETERMINISTIC_ABORT_AFTER = 2
+
+
+class DeadPageError(RuntimeError):
+    """Trang fail DETERMINISTIC (cùng error class lặp liên tiếp) — loại DUY NHẤT
+    được ghi DEAD_PLACEHOLDER để pass sau skip.
+
+    Tách class riêng vì scope placeholder phải HẸP: fail vì 402 (hết credit),
+    403/401 (config), hay transient hết vòng retry (nghẽn tạm) đều PHẢI để trang
+    trống cho pass sau / lần chạy lại OCR tiếp — placeholder hoá chúng là mất
+    nội dung vĩnh viễn mà mọi tín hiệu downstream (fail=0, verify OK) vẫn xanh."""
 
 _NUM_RE = re.compile(r"\d+")
 
@@ -320,15 +332,37 @@ def ocr_page(
                 raise
             # Early-abort: cùng lớp lỗi lặp lại _DETERMINISTIC_ABORT_AFTER lần → trang
             # deterministic-fail (provider trả rỗng/malformed y hệt), retry thêm vô ích.
+            # Raise DeadPageError (KHÔNG phải RuntimeError thường) để run_batch biết
+            # đây là loại duy nhất đáng ghi placeholder; 402/403/hết-retry raise thường
+            # → trang vẫn trống → pass sau / chạy lại sau nạp credit sẽ OCR tiếp.
             cls = _error_class(msg)
             same_class_count = same_class_count + 1 if cls == prev_class else 1
             prev_class = cls
             if same_class_count >= _DETERMINISTIC_ABORT_AFTER:
-                raise
+                raise DeadPageError(msg) from exc
             wait = 2 ** attempt + (attempt * 0.5)  # 1, 2.5, 5s
             time.sleep(wait)
     assert last_exc is not None
     raise last_exc
+
+
+def list_dead_pages(ocr_dir: Path) -> list[str]:
+    """Tên trang (stem) đang mang DEAD_PLACEHOLDER trong output dir, natural-sort.
+
+    Để pipeline CẢNH BÁO to trước khi build: placeholder là HTML comment vô hình
+    trong EPUB, không báo thì sách 'DONE' mà thiếu nội dung không ai biết
+    (fail=0 vì trang 'đã có md', verify zip vẫn OK)."""
+    dead = []
+    probe_len = len(DEAD_PREFIX) + 8
+    for p in sorted(ocr_dir.glob("page_*.md"), key=natural_sort_key):
+        try:
+            with open(p, encoding="utf-8") as f:
+                head = f.read(probe_len)
+        except OSError:
+            continue
+        if head.startswith(DEAD_PREFIX):
+            dead.append(p.stem)
+    return dead
 
 
 def _is_sidecar(path: Path) -> bool:
@@ -442,17 +476,33 @@ def run_batch(
                     error=None,
                     is_blank=True,
                 )
-            # Fail thật (đã hết retry / early-abort deterministic): ghi placeholder
-            # để pass sau (ocr retry + all-2) bỏ qua thay vì OCR lại từ đầu. Vẫn tính
-            # fail (error != None) nên note/summary báo đúng số trang hỏng.
+            if isinstance(exc, DeadPageError):
+                # CHỈ deterministic-fail mới ghi placeholder (pass sau skip, cắt vòng
+                # re-OCR cross-pass — 1 trang chết từng kéo cả cuốn 2h+). Vẫn tính
+                # fail (error != None) nên note/summary báo đúng số trang hỏng.
+                # Reason cắt 1 dòng/120 ký tự: placeholder nằm trong book.md → vào
+                # EPUB dạng HTML comment, không nhét body/request-id của provider.
+                reason = _error_class(msg).splitlines()[0][:120]
+                return PageResult(
+                    page_path=page_path,
+                    markdown=DEAD_PLACEHOLDER.format(reason=reason),
+                    latency_s=0,
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    error=msg,
+                    is_dead=True,
+                )
+            # Fail khác (402 hết credit, 403 config, transient hết retry): KHÔNG
+            # placeholder — trang phải còn trống để pass retry / lần chạy lại sau
+            # nạp credit OCR tiếp. Placeholder hoá chúng = mất nội dung vĩnh viễn
+            # mà fail=0 + verify vẫn xanh (bug C1 review 2026-07-26).
             return PageResult(
                 page_path=page_path,
-                markdown=DEAD_PLACEHOLDER.format(reason=_error_class(msg)),
+                markdown=None,
                 latency_s=0,
                 prompt_tokens=0,
                 completion_tokens=0,
                 error=msg,
-                is_dead=True,
             )
 
     with ThreadPoolExecutor(max_workers=workers) as pool:

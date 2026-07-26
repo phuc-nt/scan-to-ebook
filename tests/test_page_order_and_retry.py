@@ -93,7 +93,9 @@ def test_ocr_page_transient_early_aborts_on_same_error_class(monkeypatch, tmp_pa
         raise _err(msg)
 
     monkeypatch.setattr(ocr, "_post_once", fake_post_once)
-    with pytest.raises(RuntimeError):
+    # Early-abort phải raise DeadPageError (marker cho run_batch ghi placeholder) —
+    # KHÔNG phải RuntimeError thường (loại đó để trang trống cho pass sau cứu).
+    with pytest.raises(ocr.DeadPageError):
         ocr.ocr_page("k", "m", img, retries=4)
     # Cùng class mỗi lần → abort ngay khi đếm được _DETERMINISTIC_ABORT_AFTER lần,
     # KHÔNG chạy hết retries+1=5 lần.
@@ -127,10 +129,13 @@ def test_ocr_page_transient_varying_class_retries_to_exhaustion(monkeypatch, tmp
         raise _err(m)
 
     monkeypatch.setattr(ocr, "_post_once", fake_post_once)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as ei:
         ocr.ocr_page("k", "m", img, retries=2)
     # retries=2 → 1 lần đầu + 2 retry = 3 lần gọi (không early-abort vì class đổi mỗi lần)
     assert calls["n"] == 3, f"class đổi mỗi lần phải retry hết, got {calls['n']}"
+    # Hết retry vì transient (nghẽn tạm) KHÔNG phải deterministic → không DeadPageError
+    # (trang phải còn trống để pass retry sau cứu, không bị placeholder hoá).
+    assert not isinstance(ei.value, ocr.DeadPageError)
 
 
 def test_error_class_normalizes_varying_json_positions():
@@ -219,8 +224,8 @@ def test_collect_pending_pages_excludes_sidecars(tmp_path: Path):
 # --------------------------- Bug 5: dead-page placeholder cắt vòng re-OCR cross-pass
 
 def test_run_batch_writes_dead_placeholder_and_next_pass_skips(monkeypatch, tmp_path: Path):
-    """Trang fail deterministic → run_batch ghi DEAD_PLACEHOLDER (.md size>0) →
-    collect_pending_pages pass sau BỎ QUA trang đó (không re-OCR).
+    """Trang fail DETERMINISTIC (DeadPageError) → run_batch ghi DEAD_PLACEHOLDER
+    (.md size>0) → collect_pending_pages pass sau BỎ QUA trang đó (không re-OCR).
 
     Đây là fix tail-stall: trước đây trang chết không có .md nên mỗi pass (all-1,
     ocr retry, all-2) lại ôm đủ vòng retry cho nó → 1 trang kéo cả cuốn 2h+."""
@@ -229,11 +234,10 @@ def test_run_batch_writes_dead_placeholder_and_next_pass_skips(monkeypatch, tmp_
     out = tmp_path / "out"
     (inbox / "page_1.png").write_bytes(b"\x89PNG\r\n")
 
-    # ocr_page luôn raise transient (deterministic) → work() vào nhánh dead-placeholder.
-    def always_fail(*_a, **_k):
-        raise RuntimeError("HTTP 503 Service Unavailable")
+    def always_dead(*_a, **_k):
+        raise ocr.DeadPageError("malformed response (JSON parse): Expecting value: line 1")
 
-    monkeypatch.setattr(ocr, "ocr_page", always_fail)
+    monkeypatch.setattr(ocr, "ocr_page", always_dead)
 
     summary = ocr.run_batch(
         api_key="k", input_dir=inbox, output_dir=out,
@@ -250,3 +254,31 @@ def test_run_batch_writes_dead_placeholder_and_next_pass_skips(monkeypatch, tmp_
     todo, total = ocr.collect_pending_pages(inbox, "*.png", out, None)
     assert total == 1
     assert todo == [], f"trang dead phải bị skip pass sau, còn todo: {todo}"
+    # list_dead_pages phát hiện đúng trang để pipeline la to trước khi build.
+    assert ocr.list_dead_pages(out) == ["page_1"]
+
+
+def test_run_batch_non_deterministic_fail_leaves_page_blank(monkeypatch, tmp_path: Path):
+    """Fail KHÔNG-deterministic (402 hết credit / transient hết retry) → KHÔNG ghi
+    placeholder — trang còn trống để lần chạy lại (sau nạp credit) OCR tiếp.
+
+    Bug C1 review 2026-07-26: placeholder hoá mọi fail biến 402 giữa chừng thành
+    mất nội dung vĩnh viễn mà fail=0 + verify vẫn xanh."""
+    inbox = tmp_path / "scans"
+    inbox.mkdir()
+    out = tmp_path / "out"
+    (inbox / "page_1.png").write_bytes(b"\x89PNG\r\n")
+
+    def fail_402(*_a, **_k):
+        raise RuntimeError("HTTP 402 Payment Required")
+
+    monkeypatch.setattr(ocr, "ocr_page", fail_402)
+    summary = ocr.run_batch(
+        api_key="k", input_dir=inbox, output_dir=out,
+        model="m", workers=1, pattern="*.png",
+    )
+    assert summary["fail"] == 1
+    assert not (out / "page_1.md").exists(), "402 KHÔNG được placeholder hoá"
+    # Trang vẫn trong todo pass sau → chạy lại sau nạp credit sẽ OCR tiếp.
+    todo, _ = ocr.collect_pending_pages(inbox, "*.png", out, None)
+    assert [p.stem for p in todo] == ["page_1"]

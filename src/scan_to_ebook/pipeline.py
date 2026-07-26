@@ -518,6 +518,14 @@ def run_full_pipeline(
     if summary["blank"] > 0:
         print(f"OCR: {summary['blank']} blank page → placeholder, tiếp tục build.", file=human_out)
 
+    # Trang DEAD placeholder (fail deterministic pass trước) vô hình trong EPUB —
+    # phải la to ở build-time, nếu không sách "DONE" mà thiếu nội dung không ai biết.
+    dead_pages = ocr.list_dead_pages(bp.ocr_dir)
+    if dead_pages:
+        print(f"⚠ {len(dead_pages)} trang DEAD placeholder (OCR FAILED, THIẾU nội dung): "
+              f"{', '.join(dead_pages)} — muốn cứu: xoá work/ocr/<trang>.md rồi chạy lại.",
+              file=sys.stderr)
+
     built = _build_book(bp, bp.scans_dir, meta)
     stats = built["stats"]
     print(f"Merged: {stats['pages_merged']} pages, {stats['chars']} chars, h1={stats['h1']} h2={stats['h2']} footnotes={stats['footnotes']}", file=human_out)
@@ -536,9 +544,12 @@ def run_full_pipeline(
         paths["uploaded"] = f"{args.remote}:{args.folder}/{rename}"
 
     if mode == "json":
+        extra = {"prepass_cost_usd": round(total_prepass_cost, 4)}
+        if dead_pages:
+            extra["dead_pages"] = dead_pages
         json_output.print_summary(json_output.build_summary(
             stage="all", status="ok", pages=pages, cost_usd=cost, paths=paths,
-            extra={"prepass_cost_usd": round(total_prepass_cost, 4)}))
+            extra=extra))
     return 0
 
 
@@ -568,6 +579,11 @@ def run_smoke_gate(args, bp: BookPaths, meta, mode, human_out, api_key):
         limit=10, max_tokens=args.max_tokens, on_event=on_event, prompt_context=block,
         lang=meta.get("lang"),
     )
+    # Sổ cost: smoke cũng tiêu tiền thật (prepass one-off + ≤10 trang OCR). Full
+    # pass sau đó là cache-hit ($0, entry <=0 tự bỏ) — không ghi ở đây thì tổng sổ
+    # under-count đúng phần carried_cost tồn tại để bù.
+    cost_ledger.append_entry(bp.work_dir, "smoke-prepass", {"cost_usd": prepass_cost})
+    cost_ledger.append_entry(bp.work_dir, "smoke-ocr", summary)
     if summary["fail"] > 0:
         # Smoke fail ngay → đừng ước cost / gate, báo lỗi để user sửa input/key.
         if mode == "json":

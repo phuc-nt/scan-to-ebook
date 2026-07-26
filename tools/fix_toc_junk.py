@@ -59,7 +59,8 @@ def clean_book_md(text: str, title: str, authors: list[str]) -> tuple[str, int, 
             if heading_n in TOC_HEADINGS:
                 removed_toc += 1
                 i += 1
-                while i < len(lines) and not lines[i].startswith("## "):
+                # dừng ở BẤT KỲ heading nào (kể cả '# ' h1) — không nuốt lố block sau
+                while i < len(lines) and not lines[i].startswith("#"):
                     i += 1
                 continue
             # body rỗng = dòng kế (bỏ dòng trống) cũng là '## ' hoặc hết file
@@ -94,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.csv:
         with open(args.csv, encoding="utf-8") as f:
             books = [(r["slug"], r.get("title", ""), _split_authors(r.get("authors", "")))
-                     for r in csv.DictReader(f)]
+                     for r in csv.DictReader(f) if r.get("slug")]
     else:
         slugs = [s.strip() for s in args.slugs.split(",") if s.strip()]
         books = [(s, args.title, _split_authors(args.authors)) for s in slugs]

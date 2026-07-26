@@ -65,10 +65,10 @@ def append_entry(work_dir: Path, stage: str, summary: dict) -> None:
 
     Gọi sau mỗi run_batch / pre-pass có cost > 0. Mọi lỗi I/O đều nuốt (sổ cost
     không bao giờ được phép làm fail build)."""
-    cost = float(summary.get("cost_usd") or 0.0)
-    if cost <= 0:
-        return
     try:
+        cost = float(summary.get("cost_usd") or 0.0)
+        if cost <= 0:
+            return
         work_dir.mkdir(parents=True, exist_ok=True)
         ledger = _ledger_path(work_dir)
         entries = _load_entries(ledger)
@@ -81,7 +81,7 @@ def append_entry(work_dir: Path, stage: str, summary: dict) -> None:
             "cost_usd": round(cost, 6),
         })
         _atomic_write(ledger, json.dumps(entries, ensure_ascii=False, indent=1))
-    except OSError:
+    except (OSError, TypeError, ValueError):
         pass
 
 

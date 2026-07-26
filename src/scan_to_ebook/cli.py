@@ -28,7 +28,21 @@ import os
 import sys
 from pathlib import Path
 
-from . import doctor, drive_download, drive_upload, epub_build, json_output, manga_pipeline, ocr, pipeline, post_process
+from . import (
+    context_prepass,
+    cost_ledger,
+    doctor,
+    drive_download,
+    drive_upload,
+    epub_build,
+    epub_verify,
+    json_output,
+    manga_pipeline,
+    ocr,
+    pdf_render,
+    pipeline,
+    post_process,
+)
 
 # Re-export pipeline symbols dưới namespace `cli` để giữ tương thích test/cmd handlers
 # (vd test_cli_ux_helpers.py dùng `cli._slugify`/`cli._import_images`/`cli.EST_COST_PER_PAGE`).
@@ -127,7 +141,7 @@ def cmd_init(args: argparse.Namespace) -> int:
                 print(f"--from không phải thư mục ảnh hay file PDF: {src}", file=sys.stderr)
                 return 2
             if is_pdf:
-                n = _import_pdf(src, bp.scans_dir)
+                n = _import_pdf(src, bp.scans_dir, dpi=args.dpi)
                 print(f"Rendered {n} trang PDF → scans/page_NNN.jpg")
             else:
                 n = _import_images(src, bp.scans_dir)
@@ -178,6 +192,33 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _resolve_ocr_context(args: argparse.Namespace, output_dir: Path, out) -> str:
+    """Chọn context block cho `ocr` trần: --context file > cache cạnh output > "".
+
+    Bug batch 3: pass retry của driver gọi `ocr` trần → mọi trang retry mất context
+    block (chính tả cổ, chế độ thơ, tên riêng) dù work/context.json nằm ngay cạnh
+    (layout chuẩn work/ocr → sibling work/context.json). Auto-load để chất lượng
+    đồng nhất giữa các pass. context.json là source-of-truth (context.md chỉ là
+    mirror) nên re-derive block qua render_block, giống all-flow."""
+    if args.no_context:
+        return ""
+    if args.context is not None:
+        ctx_file = args.context.expanduser()
+        try:
+            block = ctx_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"!! không đọc được --context {ctx_file}: {exc}", file=sys.stderr)
+            return ""
+        print(f"==> context: {ctx_file} ({len(block)} chars)", file=out)
+        return block
+    ctx = context_prepass.load_context(output_dir.parent)
+    if ctx is None:
+        return ""
+    block = context_prepass.render_block(ctx)
+    print(f"==> context: {output_dir.parent / 'context.json'} (cache, {len(block)} chars)", file=out)
+    return block
+
+
 def cmd_ocr(args: argparse.Namespace) -> int:
     input_dir = args.input.expanduser()
     output_dir = args.output.expanduser()
@@ -188,6 +229,7 @@ def cmd_ocr(args: argparse.Namespace) -> int:
     # F3: in đường dẫn output tuyệt đối ngay đầu run (stderr ở json mode).
     out = sys.stderr if mode != "human" else sys.stdout
     print(f"==> output: {output_dir.resolve()}", file=out)
+    prompt_context = _resolve_ocr_context(args, output_dir, out)
 
     api_key = pipeline._require_api_key_or_json(mode, stage="ocr")
     if api_key is None:
@@ -204,7 +246,14 @@ def cmd_ocr(args: argparse.Namespace) -> int:
         limit=args.limit,
         max_tokens=args.max_tokens,
         on_event=on_event,
+        prompt_context=prompt_context,
+        lang=args.lang,
     )
+    # Sổ cost cộng dồn: chỉ khi layout chuẩn (output = <book>/work/ocr) để `ocr`
+    # trần với output tuỳ ý không rải cost.json lung tung. Pass retry của batch
+    # driver đi đúng layout này → chi phí retry vào sổ, tổng sổ = chi thực.
+    if output_dir.name == "ocr":
+        cost_ledger.append_entry(output_dir.parent, "ocr", summary)
     rc = 0 if summary["fail"] == 0 else 1
     if mode == "json":
         status = "ok" if summary["fail"] == 0 else "partial"
@@ -216,6 +265,28 @@ def cmd_ocr(args: argparse.Namespace) -> int:
             )
         )
     return rc
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Kiểm tra cấu trúc EPUB: OK/TINY/BADZIP/MISSING per path. rc 0 khi tất cả OK."""
+    results = epub_verify.verify_paths(args.paths)
+    counts = epub_verify.summarize(results)
+    if args.json:
+        print(json.dumps({
+            "status": "ok" if counts["OK"] == counts["total"] else "partial",
+            "counts": counts,
+            "results": [
+                {"label": r.label, "path": str(r.path), "status": r.status, "size": r.size}
+                for r in results
+            ],
+        }, ensure_ascii=False))
+    else:
+        for r in results:
+            size_note = f" ({r.size // 1024}KB)" if r.status in ("OK", "TINY") else ""
+            print(f"{r.status:8} {r.label}{size_note}")
+        print(f"\nOK={counts['OK']} TINY={counts['TINY']} BADZIP={counts['BADZIP']} "
+              f"MISSING={counts['MISSING']} / {counts['total']}")
+    return 0 if counts["OK"] == counts["total"] and counts["total"] > 0 else 1
 
 
 def cmd_post(args: argparse.Namespace) -> int:
@@ -424,6 +495,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("slug", help="tên sách (folder name), vd namphong-q01")
     p_init.add_argument("--home", type=Path, default=None, help="data-root chứa mọi sách (default $SCAN2EBOOK_HOME hoặc ~/scan2ebook)")
     p_init.add_argument("--from", dest="from_dir", default=None, help="thư mục ảnh, file .pdf, HOẶC link Google Drive file → render/copy vào scans/page_NNN")
+    p_init.add_argument(
+        "--dpi", type=int, default=pdf_render.DEFAULT_DPI,
+        help=(
+            f"DPI render PDF (default {pdf_render.DEFAULT_DPI}). Scan nguồn thấp (vd ảnh nhúng "
+            "1024px) thì 72 cho ra đúng pixel gốc — render cao hơn chỉ phóng to, không thêm "
+            "thông tin mà payload OCR to gấp ~2.6×. Kiểm cỡ ảnh gốc: pdfimages -list <pdf>"
+        ),
+    )
     p_init.add_argument("--title", default=None, help="title cho metadata.json (default = slug)")
     p_init.add_argument("--author", default=None)
     p_init.add_argument("--lang", default="vi")
@@ -444,9 +523,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_ocr.add_argument("--pattern", default=IMAGE_PATTERNS, help="glob ảnh, phân tách dấu phẩy (default PNG+JPG)")
     p_ocr.add_argument("--limit", type=int, default=None, help="OCR tối đa N page đầu (smoke test)")
     p_ocr.add_argument("--max-tokens", type=int, default=12000, help="max output tokens / page")
+    p_ocr.add_argument("--lang", default="vi", help="ngôn ngữ sách → chọn prompt OCR (vi mặc định | ja cho sách Nhật dọc RTL)")
+    p_ocr.add_argument("--context", type=Path, default=None, help="file text làm context block (override auto-load từ <output>/../context.json)")
+    p_ocr.add_argument("--no-context", dest="no_context", action="store_true", help="OCR bằng base prompt, bỏ qua context block cache")
     p_ocr.add_argument("--dry-run", action="store_true", help="đếm page + ước lượng chi phí, không gọi API")
     _add_json_flags(p_ocr)
     p_ocr.set_defaults(func=cmd_ocr)
+
+    # verify
+    p_verify = sub.add_parser("verify", help="Kiểm tra cấu trúc EPUB (zip integrity): epub / book-home / thư mục nhiều book-home")
+    p_verify.add_argument("paths", type=Path, nargs="+", help="file .epub | book-home | thư mục chứa nhiều book-home")
+    p_verify.add_argument("--json", action="store_true", help="in 1 JSON object thay vì bảng người đọc")
+    p_verify.set_defaults(func=cmd_verify)
 
     # post
     p_post = sub.add_parser("post", help="Stage 2: merge per-page md → book.md")
@@ -483,6 +571,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--workers", type=int, default=12)
     p_all.add_argument("--max-tokens", type=int, default=12000, help="max output tokens / page")
     p_all.add_argument("--dry-run", action="store_true", help="đếm page + ước lượng chi phí, không gọi API")
+    p_all.add_argument("--skip-prepass", dest="skip_prepass", action="store_true", help="bỏ qua context pre-pass (sách bị moderation chặn ảnh mẫu; trang còn lại OCR bằng base prompt + cache context nếu có)")
     p_all.add_argument("--smoke", action="store_true", help="OCR ≤10 trang + mini epub + ước cost full rồi STOP (gate xác nhận)")
     p_all.add_argument("--yes", "-y", action="store_true", help="bỏ qua prompt smoke gate, chạy full luôn (agent/CI)")
     p_all.add_argument("--upload", action="store_true", help="upload epub lên Drive sau khi build")

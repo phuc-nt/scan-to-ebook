@@ -15,6 +15,7 @@ import base64
 import json
 import os
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -23,6 +24,14 @@ from urllib import error as urlerr, request as urlreq
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "qwen/qwen3.7-plus"
+
+# Timeout 1 request OCR (giây). Trang bình thường trả trong ~5-10s; trang text dày
+# cùng lắm ~30-40s. 90s là dư. Trước dùng 300s → khi provider ôm connection im lặng
+# (0 byte, không đóng), 1 trang kẹt 300s × 4 retry ≈ 25 phút, kéo cả cuốn theo
+# (đo thật batch3 phi-long: 2 cuốn dính 1 trang kẹt mỗi cuốn → 27-29 phút/cuốn).
+# Hạ xuống 90s → trang kẹt fail-fast, chuyển sang retry ngay (transient → backoff).
+# Worst-case còn 90s × 5 lần ≈ 7.5 phút/trang thay vì 25 phút.
+REQUEST_TIMEOUT_S = 90
 
 # Giá OpenRouter ($/M token in, out) — verify live 2026-06-08. Dùng để ước tính
 # cost; nếu model không có trong bảng, fallback giá DEFAULT_MODEL. Provider đổi
@@ -43,6 +52,30 @@ BLANK_PLACEHOLDER = "<!-- blank page -->"
 # Marker error nhận diện trang trống thật: model trả rỗng VÀ finish_reason=stop
 # (tự kết thúc, không phải lỗi/cắt). Không retry — retry trang trắng vô ích.
 _BLANK_MARKER = "blank page (empty + finish_reason=stop)"
+
+# Placeholder ghi cho trang FAIL deterministic (provider trả rỗng/malformed lặp lại y
+# hệt sau retry — không cứu được). Ghi file này để pass sau (ocr retry + all-2) bỏ qua
+# thay vì OCR lại từ đầu: 1 trang chết đơn lẻ từng kéo cả cuốn tới 2h+ khi mỗi pass ôm
+# lại đủ vòng retry. Placeholder có size>0 nên collect_pending_pages skip; text nêu rõ
+# lỗi + "cần xử lý tay" để người sửa sau (hiếm). Trang vẫn tính là FAIL, không phải ok.
+DEAD_PLACEHOLDER = "<!-- OCR FAILED (deterministic) — cần xử lý tay: {reason} -->"
+# Prefix nhận diện dead-placeholder khi quét lại (pipeline cảnh báo trước khi build).
+DEAD_PREFIX = "<!-- OCR FAILED (deterministic)"
+# Số lần lặp lại CÙNG error class trong 1 ocr_page call thì abort sớm (khỏi đợi hết
+# retries). Trang provider trả deterministic thì retry thêm chỉ tốn thời gian + tiền.
+_DETERMINISTIC_ABORT_AFTER = 2
+
+
+class DeadPageError(RuntimeError):
+    """Trang fail DETERMINISTIC — loại DUY NHẤT được ghi DEAD_PLACEHOLDER để pass
+    sau skip. Hai đường vào: (1) lỗi content-class (empty/malformed) lặp cùng class
+    liên tiếp; (2) HTTP 400 moderation/định-dạng-ảnh (_DEAD_400_MARKERS) ngay lần đầu.
+
+    Tách class riêng vì scope placeholder phải HẸP: fail vì 402 (hết credit),
+    403/401 (config), hay 429/5xx/timeout (hạ tầng — kể cả lặp cùng class trong
+    burst) đều PHẢI để trang trống cho pass sau / lần chạy lại OCR tiếp —
+    placeholder hoá chúng là mất nội dung vĩnh viễn mà mọi tín hiệu downstream
+    (fail=0, verify OK) vẫn xanh."""
 
 _NUM_RE = re.compile(r"\d+")
 
@@ -77,6 +110,53 @@ CHỈ output Markdown. KHÔNG giải thích, KHÔNG ```markdown wrapper, KHÔNG 
 """
 
 
+# Prompt OCR riêng cho sách tiếng NHẬT (dọc, đọc phải→trái). KHÔNG dùng quy tắc dấu
+# tiếng Việt. Nguồn thường là ẢNH CHỤP MÀN HÌNH app đọc (Kindle…) → có thanh menu hệ
+# điều hành + header/footer app + dock; phải BỎ QUA, chỉ lấy vùng chữ thật của sách.
+JA_PROMPT = """You are an OCR engine for JAPANESE books (novels, essays, literature).
+
+TASK: Extract ALL Japanese book text in this image into clean Markdown.
+
+THE IMAGE IS A SCREENSHOT of a reading app (e.g. Kindle). IGNORE everything that is
+not book body text: the OS menu bar, the app's title/header bar (running book title),
+the footer (reading progress, "N% / N minutes left in chapter", page indicators), the
+dock, window chrome. Transcribe ONLY the book's own text region.
+
+MANDATORY RULES:
+1. Japanese is written VERTICALLY (tategaki) and read TOP→BOTTOM, then columns
+   RIGHT→LEFT. Read each column top to bottom; move to the NEXT column to the LEFT.
+2. TWO-PAGE SPREAD (landscape image, two separate text blocks with a gutter in the
+   middle): this is right-to-left reading order — read the RIGHT page fully FIRST,
+   then the LEFT page. Concatenate into continuous text.
+3. Reproduce the text EXACTLY as printed: kanji, hiragana, katakana, punctuation
+   (。、「」『』…—), and ruby/furigana base text. Do NOT translate, do NOT romanize,
+   do NOT modernize kanji. Proper names and foreign words: copy exactly as printed.
+4. Furigana (small reading glosses beside kanji): transcribe the MAIN kanji text; you
+   may drop the furigana gloss (it is a pronunciation aid, not body text).
+5. Chapter/section titles: use `## `.
+6. Paragraphs: separate with a blank line. Do NOT hard-wrap inside a paragraph — join
+   a paragraph's lines/columns into one continuous line.
+7. Skip running headers/footers (book/chapter title repeated at the page edge) and
+   page numbers.
+
+Output Markdown ONLY. No explanation, no ```markdown wrapper, no extra comments.
+"""
+
+
+# Registry prompt OCR theo ngôn ngữ. `lang` (từ metadata.json / --lang) chọn prompt;
+# thiếu/không khớp → fallback PROMPT tiếng Việt (mặc định, verified artifact). Base
+# PROMPT (vi) GIỮ NGUYÊN byte-for-byte; ngôn ngữ mới = THÊM entry, không sửa vi.
+PROMPTS: dict[str, str] = {
+    "vi": PROMPT,
+    "ja": JA_PROMPT,
+}
+
+
+def prompt_for_lang(lang: str | None) -> str:
+    """Chọn base prompt OCR theo lang. Lạ/None → PROMPT tiếng Việt (mặc định)."""
+    return PROMPTS.get((lang or "vi").strip().lower(), PROMPT)
+
+
 @dataclass
 class PageResult:
     page_path: Path
@@ -86,6 +166,7 @@ class PageResult:
     completion_tokens: int
     error: str | None
     is_blank: bool = False  # trang trống thật → ghi placeholder, không tính fail
+    is_dead: bool = False   # fail deterministic → ghi placeholder để skip pass sau, VẪN tính fail
 
 
 def _encode_image(path: Path) -> str:
@@ -118,12 +199,14 @@ def _post_once(
     mime: str,
     max_tokens: int,
     prompt_context: str = "",
+    lang: str | None = None,
 ) -> tuple[str, dict]:
     """1 lần POST, không retry. Raises trên HTTP/parse error với body context.
 
     `prompt_context` (block bối cảnh sách từ context pre-pass) được append vào base
-    PROMPT khi non-empty. Base PROMPT giữ nguyên byte-for-byte."""
-    text = PROMPT + ("\n\n" + prompt_context if prompt_context else "")
+    prompt khi non-empty. `lang` chọn base prompt (vi mặc định, ja cho sách Nhật);
+    base prompt mỗi ngôn ngữ giữ nguyên byte-for-byte."""
+    text = prompt_for_lang(lang) + ("\n\n" + prompt_context if prompt_context else "")
     payload = {
         "model": model,
         "messages": [
@@ -154,7 +237,7 @@ def _post_once(
     )
     t0 = time.time()
     try:
-        with urlreq.urlopen(req, timeout=300) as resp:
+        with urlreq.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
             raw = resp.read().decode("utf-8")
     except urlerr.HTTPError as exc:
         try:
@@ -162,6 +245,13 @@ def _post_once(
         except Exception:
             err_body = "<unreadable>"
         raise RuntimeError(f"HTTP {exc.code} {exc.reason}: {err_body}") from exc
+    except (TimeoutError, urlerr.URLError) as exc:
+        # Timeout (provider ôm connection im lặng) hoặc lỗi mạng (DNS/reset) → transient.
+        # urlopen raise TimeoutError/URLError (KHÔNG phải RuntimeError) → ocr_page sẽ
+        # bỏ qua retry nếu không wrap. Đổi thành RuntimeError chứa "timed out" để
+        # _is_transient bắt được → ocr_page retry với backoff thay vì fail thẳng.
+        reason = getattr(exc, "reason", exc)
+        raise RuntimeError(f"request timed out / network error: {reason}") from exc
     # Response body đôi khi bị cắt/malformed (provider stream lỗi) → JSONDecodeError.
     # Đây là transient (trang text dày, response lớn dễ đứt), không phải config error.
     # Gắn marker "malformed response" để ocr_page retry thay vì raise luôn.
@@ -171,9 +261,10 @@ def _post_once(
         raise RuntimeError(f"malformed response (JSON parse): {exc} | body[:200]={raw[:200]!r}") from exc
     latency = time.time() - t0
 
+    usage = body.get("usage", {})
     if "choices" not in body or not body["choices"]:
         err = body.get("error", body)
-        raise RuntimeError(f"no choices in response: {json.dumps(err)[:300]}")
+        raise _usage_err(f"no choices in response: {json.dumps(err)[:300]}", usage)
 
     msg = body["choices"][0].get("message", {})
     text = msg.get("content")
@@ -181,12 +272,42 @@ def _post_once(
         finish = body["choices"][0].get("finish_reason", "unknown")
         # finish_reason=stop + rỗng = trang trống thật (model xem xong, không có gì).
         # Phân biệt với rỗng do lỗi/cắt (finish khác) → cái sau vẫn transient retry.
+        # Cả hai đều ĐÃ BILL input tokens (ảnh full-res) — gắn usage vào exception
+        # để ocr_page cộng vào waste accounting (review 2026-07-26 B4).
         if finish == "stop":
-            raise RuntimeError(_BLANK_MARKER)
-        raise RuntimeError(f"empty content (finish_reason={finish})")
+            raise _usage_err(_BLANK_MARKER, usage)
+        raise _usage_err(f"empty content (finish_reason={finish})", usage)
 
-    usage = body.get("usage", {})
     return text, {"latency_s": round(latency, 2), "usage": usage}
+
+
+def _dead(msg: str, waste_in: int, waste_out: int) -> "DeadPageError":
+    """DeadPageError kèm waste_usage (tổng token đã bill của trang) — xem _usage_err."""
+    exc = DeadPageError(msg)
+    exc.waste_usage = (waste_in, waste_out)
+    return exc
+
+
+def _usage_err(msg: str, usage: dict) -> RuntimeError:
+    """RuntimeError kèm `usage` (token ĐÃ BILL của attempt này).
+
+    Attempt trả body hợp lệ nhưng bị coi là lỗi (empty content / blank / no choices)
+    vẫn tiêu input tokens thật (ảnh full-res ~nghìn token). Không gắn usage thì
+    ocr_page/run_batch mất dấu → sổ cost under-count hệ thống (B4)."""
+    exc = RuntimeError(msg)
+    exc.usage = usage
+    return exc
+
+
+def _error_class(msg: str) -> str:
+    """Chuẩn hoá 1 error message về 'lớp lỗi' để so 2 lần fail có cùng nguyên nhân.
+
+    Bỏ phần biến thiên giữa các lần gọi cùng 1 trang: số dòng/cột/char trong lỗi JSON
+    (`line 2997 column 1 (char 16478)`) và body snippet (`body[:200]=...`). Nhờ vậy
+    2 lần malformed liên tiếp cùng trang → cùng class → coi là deterministic, abort sớm.
+    """
+    head = msg.split(" | body[:")[0]        # cắt body snippet biến thiên
+    return _NUM_RE.sub("#", head)           # số → '#' để bỏ line/col/char
 
 
 def _is_transient(msg: str) -> bool:
@@ -204,6 +325,33 @@ def _is_transient(msg: str) -> bool:
     ) and _BLANK_MARKER not in msg
 
 
+# HTTP 400 mang các marker này = lỗi DETERMINISTIC theo NỘI DUNG ảnh: provider
+# moderation chặn ảnh (data_inspection_failed — sách chiến tranh/lịch sử hay dính)
+# hoặc ảnh sai định dạng. Retry CÙNG ảnh không bao giờ khác kết quả → DeadPageError
+# ngay lần đầu (placeholder → pass sau skip → sách VẪN build được, trang tính fail).
+# Không có nhánh này, trang kẹt `todo` vĩnh viễn → mọi pass `all` fail>0 → không bao
+# giờ ra EPUB (WARN loop vô hạn trong batch — review 2026-07-26 B1). HTTP 400 KHÁC
+# (không marker) vẫn fail thường: không đoán bừa nguyên nhân.
+_DEAD_400_MARKERS = ("data_inspection_failed", "image format is illegal")
+
+
+def _is_dead_400(msg: str) -> bool:
+    """HTTP 400 content-deterministic (moderation / định dạng ảnh) → đáng DeadPageError."""
+    return "HTTP 400" in msg and any(m in msg for m in _DEAD_400_MARKERS)
+
+
+def _counts_as_deterministic(msg: str) -> bool:
+    """Lỗi được phép ĐẾM vào early-abort deterministic: CHỈ content-class.
+
+    'empty content (finish_reason=…)' / 'malformed response': provider đọc cùng ảnh
+    trả cùng kết quả hỏng → lặp class = deterministic thật, abort sớm hợp lý.
+    429/5xx/timeout là lỗi HẠ TẦNG: burst rate-limit / incident / nghẽn trả lỗi y hệt
+    nhau trong 1-2s nên "cùng class 2 lần" KHÔNG chứng minh trang hỏng — phải hưởng
+    trọn retry budget và không bao giờ DeadPageError (trang nghẽn tạm bị placeholder
+    hoá = mất nội dung vĩnh viễn — review 2026-07-26 B2)."""
+    return "empty content" in msg or "malformed response" in msg
+
+
 def ocr_page(
     api_key: str,
     model: str,
@@ -211,27 +359,99 @@ def ocr_page(
     retries: int = 4,
     max_tokens: int = 12000,
     prompt_context: str = "",
+    lang: str | None = None,
 ) -> tuple[str, dict]:
     """Single page OCR với retry exponential backoff cho transient error.
 
     Retry trên 429/5xx/timeout/empty content/malformed JSON. Không retry trên
     4xx khác, cũng không retry blank page (empty+finish_reason=stop) — trang
     trống thật, run_batch sẽ ghi placeholder. `prompt_context` từ context pre-pass
-    được thread xuống _post_once."""
+    và `lang` (chọn base prompt) được thread xuống _post_once."""
     image_b64 = _encode_image(image_path)
     mime = _detect_mime(image_path)
     last_exc: Exception | None = None
+    prev_class: str | None = None
+    same_class_count = 0
+    # Token ĐÃ BILL bởi các attempt fail trước đó (empty content/blank có body hợp lệ
+    # kèm usage). Cộng dồn để: (a) thành công sau retry → meta mang waste_tokens_* cho
+    # run_batch tính đủ cost; (b) fail hẳn → gắn waste_usage vào exception (B4).
+    waste_in = waste_out = 0
     for attempt in range(retries + 1):
         try:
-            return _post_once(api_key, model, image_b64, mime, max_tokens, prompt_context)
+            text, meta = _post_once(api_key, model, image_b64, mime, max_tokens, prompt_context, lang)
+            meta["waste_tokens_in"] = waste_in
+            meta["waste_tokens_out"] = waste_out
+            return text, meta
         except RuntimeError as exc:
             last_exc = exc
-            if not _is_transient(str(exc)) or attempt == retries:
+            msg = str(exc)
+            u = getattr(exc, "usage", None) or {}
+            waste_in += int(u.get("prompt_tokens") or 0)
+            waste_out += int(u.get("completion_tokens") or 0)
+            # Mọi exception thoát ra ngoài đều mang tổng token đã bill của TRANG này
+            # (kể cả attempt hiện tại) để run_batch cộng vào summary/sổ cost.
+            exc.waste_usage = (waste_in, waste_out)
+            # HTTP 400 content-deterministic (moderation chặn ảnh / định dạng ảnh):
+            # retry cùng ảnh không bao giờ khác → DeadPageError NGAY lần đầu để
+            # run_batch ghi placeholder (sách vẫn build, trang tính fail). 401/402/403
+            # và 400 khác vẫn raise thường (trang trống cho pass sau) — xem docstring
+            # DeadPageError.
+            if _is_dead_400(msg):
+                raise _dead(msg, waste_in, waste_out) from exc
+            if not _is_transient(msg) or attempt == retries:
                 raise
+            # Early-abort: CHỈ lỗi content-class (empty/malformed) được đếm — cùng lớp
+            # lặp _DETERMINISTIC_ABORT_AFTER lần → trang deterministic-fail, retry thêm
+            # vô ích → DeadPageError (run_batch ghi placeholder). 429/5xx/timeout là
+            # hạ tầng (burst trả lỗi y hệt trong 1-2s): KHÔNG đếm, hưởng trọn retry;
+            # hết vòng raise thường → trang trống, pass sau cứu.
+            if _counts_as_deterministic(msg):
+                cls = _error_class(msg)
+                same_class_count = same_class_count + 1 if cls == prev_class else 1
+                prev_class = cls
+                if same_class_count >= _DETERMINISTIC_ABORT_AFTER:
+                    raise _dead(msg, waste_in, waste_out) from exc
+            else:
+                # Lỗi hạ tầng xen giữa: reset streak — không để 1 lần empty trước đó
+                # + 1 lần empty sau chuỗi 429 bị ghép thành "2 lần liên tiếp".
+                prev_class, same_class_count = None, 0
             wait = 2 ** attempt + (attempt * 0.5)  # 1, 2.5, 5s
             time.sleep(wait)
     assert last_exc is not None
     raise last_exc
+
+
+def list_dead_pages(ocr_dir: Path) -> list[str]:
+    """Tên trang (stem) đang mang DEAD_PLACEHOLDER trong output dir, natural-sort.
+
+    Để pipeline CẢNH BÁO to trước khi build: placeholder là HTML comment vô hình
+    trong EPUB, không báo thì sách 'DONE' mà thiếu nội dung không ai biết
+    (fail=0 vì trang 'đã có md', verify zip vẫn OK)."""
+    dead = []
+    probe_len = len(DEAD_PREFIX) + 8
+    for p in sorted(ocr_dir.glob("page_*.md"), key=natural_sort_key):
+        try:
+            with open(p, encoding="utf-8") as f:
+                head = f.read(probe_len)
+        except OSError:
+            continue
+        if head.startswith(DEAD_PREFIX):
+            dead.append(p.stem)
+    return dead
+
+
+def _is_sidecar(path: Path) -> bool:
+    """File rác của filesystem, KHÔNG phải trang sách.
+
+    macOS ghi lên volume không hỗ trợ metadata gốc (exFAT/FAT/SMB — ổ ngoài, NAS)
+    đẻ kèm AppleDouble `._page_001.jpg` cho MỖI file: cùng đuôi ảnh nên lọt glob,
+    nhưng ruột là metadata → vision API trả HTTP 400 "image format is illegal".
+
+    Nguy hiểm vì âm thầm: nhân đôi số trang, mỗi trang rác vẫn tính tiền retry và
+    đội fail-rate lên ~50% mà chẳng có gì hỏng thật. Cũng bỏ `.DS_Store`,
+    `Thumbs.db` (Windows) cho trọn."""
+    name = path.name
+    return name.startswith("._") or name in {".DS_Store", "Thumbs.db"}
 
 
 def _glob_patterns(input_dir: Path, pattern: str) -> list[Path]:
@@ -243,6 +463,8 @@ def _glob_patterns(input_dir: Path, pattern: str) -> list[Path]:
     seen: dict[Path, None] = {}
     for pat in (p.strip() for p in pattern.split(",") if p.strip()):
         for path in input_dir.glob(pat):
+            if _is_sidecar(path):
+                continue
             seen[path] = None
     return list(seen)
 
@@ -277,12 +499,14 @@ def run_batch(
     max_tokens: int = 12000,
     on_event=None,
     prompt_context: str = "",
+    lang: str | None = None,
 ) -> dict:
     """Run OCR batch. Returns summary dict.
 
     `on_event(kind, payload)` — optional callback cho progress logging
     (kind: 'start', 'page_ok', 'page_fail', 'done').
-    `prompt_context` — block bối cảnh sách (context pre-pass) append vào PROMPT mỗi trang."""
+    `prompt_context` — block bối cảnh sách (context pre-pass) append vào base prompt
+    mỗi trang. `lang` chọn base prompt theo ngôn ngữ (vi mặc định, ja cho sách Nhật)."""
     input_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -299,39 +523,83 @@ def run_batch(
     ok_count = fail_count = blank_count = 0
     failures: list[tuple[str, str]] = []
 
+    # Circuit breaker 402: credit cạn giữa cuốn → MỌI call còn lại chắc chắn fail
+    # 402 (fail-fast nhưng vẫn là 1 HTTP round-trip vô ích × hàng trăm trang × N lane
+    # cùng wind-down = hàng nghìn call chết dội API — review 2026-07-26 B3). Trang
+    # đầu tiên dính 402 set event; trang chưa gọi API bỏ qua tại chỗ, để trống →
+    # resume sau nạp credit OCR tiếp như thường. Message giữ "HTTP 402 Payment
+    # Required" để batch driver grep log vẫn nhận diện STOP(402).
+    credit_dead = threading.Event()
+
     def work(page_path: Path) -> PageResult:
-        try:
-            md, meta = ocr_page(
-                api_key, model, page_path, max_tokens=max_tokens, prompt_context=prompt_context
-            )
-            usage = meta.get("usage", {})
-            return PageResult(
-                page_path=page_path,
-                markdown=md,
-                latency_s=meta["latency_s"],
-                prompt_tokens=usage.get("prompt_tokens", 0),
-                completion_tokens=usage.get("completion_tokens", 0),
-                error=None,
-            )
-        except Exception as exc:
-            msg = str(exc)
-            if _BLANK_MARKER in msg:
-                # Trang trống thật: ghi placeholder, đánh dấu blank (không phải fail).
-                return PageResult(
-                    page_path=page_path,
-                    markdown=BLANK_PLACEHOLDER,
-                    latency_s=0,
-                    prompt_tokens=0,
-                    completion_tokens=0,
-                    error=None,
-                    is_blank=True,
-                )
+        if credit_dead.is_set():
             return PageResult(
                 page_path=page_path,
                 markdown=None,
                 latency_s=0,
                 prompt_tokens=0,
                 completion_tokens=0,
+                error="HTTP 402 Payment Required — bỏ qua không gọi API (credit đã cạn trong batch)",
+            )
+        try:
+            md, meta = ocr_page(
+                api_key, model, page_path, max_tokens=max_tokens,
+                prompt_context=prompt_context, lang=lang,
+            )
+            usage = meta.get("usage", {})
+            # Token = lần thành công + waste các attempt fail trước đó (đều đã bill).
+            return PageResult(
+                page_path=page_path,
+                markdown=md,
+                latency_s=meta["latency_s"],
+                prompt_tokens=usage.get("prompt_tokens", 0) + meta.get("waste_tokens_in", 0),
+                completion_tokens=usage.get("completion_tokens", 0) + meta.get("waste_tokens_out", 0),
+                error=None,
+            )
+        except Exception as exc:
+            msg = str(exc)
+            # Token đã bill của các attempt trang này (ocr_page gắn vào exception) —
+            # cộng vào summary dù trang fail/blank, sổ cost mới khớp chi thực (B4).
+            w_in, w_out = getattr(exc, "waste_usage", None) or (0, 0)
+            if "HTTP 402" in msg:
+                credit_dead.set()  # trang sau bỏ qua tại chỗ, không bắn call chết
+            if _BLANK_MARKER in msg:
+                # Trang trống thật: ghi placeholder, đánh dấu blank (không phải fail).
+                return PageResult(
+                    page_path=page_path,
+                    markdown=BLANK_PLACEHOLDER,
+                    latency_s=0,
+                    prompt_tokens=w_in,
+                    completion_tokens=w_out,
+                    error=None,
+                    is_blank=True,
+                )
+            if isinstance(exc, DeadPageError):
+                # CHỈ deterministic-fail mới ghi placeholder (pass sau skip, cắt vòng
+                # re-OCR cross-pass — 1 trang chết từng kéo cả cuốn 2h+). Vẫn tính
+                # fail (error != None) nên note/summary báo đúng số trang hỏng.
+                # Reason cắt 1 dòng/120 ký tự: placeholder nằm trong book.md → vào
+                # EPUB dạng HTML comment, không nhét body/request-id của provider.
+                reason = _error_class(msg).splitlines()[0][:120]
+                return PageResult(
+                    page_path=page_path,
+                    markdown=DEAD_PLACEHOLDER.format(reason=reason),
+                    latency_s=0,
+                    prompt_tokens=w_in,
+                    completion_tokens=w_out,
+                    error=msg,
+                    is_dead=True,
+                )
+            # Fail khác (402 hết credit, 403 config, transient hết retry): KHÔNG
+            # placeholder — trang phải còn trống để pass retry / lần chạy lại sau
+            # nạp credit OCR tiếp. Placeholder hoá chúng = mất nội dung vĩnh viễn
+            # mà fail=0 + verify vẫn xanh (bug C1 review 2026-07-26).
+            return PageResult(
+                page_path=page_path,
+                markdown=None,
+                latency_s=0,
+                prompt_tokens=w_in,
+                completion_tokens=w_out,
                 error=msg,
             )
 
@@ -339,9 +607,18 @@ def run_batch(
         futures = [pool.submit(work, p) for p in todo]
         for fut in as_completed(futures):
             r = fut.result()
+            # Token cộng cho MỌI kết quả (ok/blank/dead/fail) — attempt fail cũng đã
+            # bill input tokens thật; chỉ cộng ok là sổ cost under-count (B4).
+            total_in += r.prompt_tokens
+            total_out += r.completion_tokens
             if r.error:
                 fail_count += 1
                 failures.append((r.page_path.name, r.error))
+                # Ghi dead-placeholder (size>0) để collect_pending_pages pass sau skip
+                # trang này — cắt vòng re-OCR cross-pass (1 trang chết từng kéo cả cuốn
+                # 2h+). Nếu vì lý do gì markdown None thì bỏ qua ghi.
+                if r.is_dead and r.markdown is not None:
+                    _atomic_write(output_dir / f"{r.page_path.stem}.md", r.markdown)
                 if on_event:
                     on_event("page_fail", {"page": r.page_path.name, "error": r.error})
                 continue
@@ -352,8 +629,6 @@ def run_batch(
                 if on_event:
                     on_event("page_blank", {"page": r.page_path.name, "dst": dst.name})
                 continue
-            total_in += r.prompt_tokens
-            total_out += r.completion_tokens
             ok_count += 1
             if on_event:
                 on_event(

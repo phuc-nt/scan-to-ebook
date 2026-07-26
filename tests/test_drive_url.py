@@ -177,9 +177,9 @@ def test_download_http_error_raises(tmp_path, monkeypatch):
 
 # ------------------------------------------------------------------ cmd_init wiring
 
-def _init_args(slug, from_dir, home):
+def _init_args(slug, from_dir, home, dpi=pdf_render.DEFAULT_DPI):
     return argparse.Namespace(
-        slug=slug, from_dir=from_dir, home=home,
+        slug=slug, from_dir=from_dir, home=home, dpi=dpi,
         title=None, author=None, lang="vi", year=None,
     )
 

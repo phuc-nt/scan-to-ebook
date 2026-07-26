@@ -21,7 +21,7 @@ import unicodedata
 from pathlib import Path
 from typing import NamedTuple
 
-from . import context_prepass, drive_upload, epub_build, image_ops, json_output, ocr, pdf_render, post_process
+from . import context_prepass, cost_ledger, drive_upload, epub_build, image_ops, json_output, ocr, pdf_render, post_process
 
 # Giá ước lượng qwen3.7-plus ~$0.004/page (đo benchmark 2026-06-08, 1 ảnh A4).
 # CHỈ là fallback trước smoke; sau smoke, per_page token-based đo thật sẽ override.
@@ -416,7 +416,7 @@ def _run_prepass_or_abort(
     try:
         res = context_prepass.run_prepass(
             api_key, model, scans_dir, IMAGE_PATTERNS, max_tokens=max_tokens,
-            out_dir=work_dir,
+            out_dir=work_dir, lang=(meta.get("lang") if meta else None),
         )
     except RuntimeError as exc:
         if on_event:
@@ -464,23 +464,43 @@ def run_full_pipeline(
     smoke. Full prepass = cache hit (cost 0) nên phải fold carried_cost vào tổng để
     summary không under-count spend."""
     on_event, collector, _ = _make_ocr_emitter(mode)
-    prepass = _run_prepass_or_abort(
-        api_key=api_key, model=args.model, scans_dir=bp.scans_dir, work_dir=bp.work_dir,
-        max_tokens=context_prepass.CONTEXT_MAX_TOKENS, on_event=on_event,
-        meta=meta, slug=bp.book_home.name,
-    )
-    if prepass is None:
-        return _prepass_fail_summary(mode, "all", bp.ocr_dir)
-    block, prepass_cost = prepass
+    # Pre-pass chỉ phục vụ OCR. Đếm todo TRƯỚC: 0 trang cần OCR (rebuild từ md cache)
+    # → bỏ qua pre-pass hẳn — không tốn cost, không dính moderation (batch 3: sách
+    # ảnh chiến tranh bị provider chặn ảnh mẫu `data_inspection_failed` làm abort
+    # cả build dù md đã đủ). --skip-prepass: ép bỏ qua khi vẫn còn trang (operator
+    # chấp nhận OCR phần còn lại bằng base prompt + cache context nếu có).
+    todo, _ = ocr.collect_pending_pages(bp.scans_dir, IMAGE_PATTERNS, bp.ocr_dir, None)
+    skip_prepass = getattr(args, "skip_prepass", False)
+    if not todo or skip_prepass:
+        ctx = context_prepass.load_context(bp.work_dir)
+        block = context_prepass.render_block(ctx) if ctx else ""
+        prepass_cost = 0.0
+        reason = "0 trang cần OCR" if not todo else "--skip-prepass"
+        cache_note = "dùng cache context.json" if ctx else "không có cache context"
+        print(f"==> bỏ qua context pre-pass ({reason}; {cache_note})", file=human_out)
+    else:
+        prepass = _run_prepass_or_abort(
+            api_key=api_key, model=args.model, scans_dir=bp.scans_dir, work_dir=bp.work_dir,
+            max_tokens=context_prepass.CONTEXT_MAX_TOKENS, on_event=on_event,
+            meta=meta, slug=bp.book_home.name,
+        )
+        if prepass is None:
+            return _prepass_fail_summary(mode, "all", bp.ocr_dir)
+        block, prepass_cost = prepass
     summary = ocr.run_batch(
         api_key=api_key, input_dir=bp.scans_dir, output_dir=bp.ocr_dir,
         model=args.model, workers=args.workers, pattern=IMAGE_PATTERNS,
         max_tokens=args.max_tokens, on_event=on_event, prompt_context=block,
+        lang=meta.get("lang"),
     )
     pages = collector.pages() if collector else {
         "ok": summary["ok"], "blank": summary["blank"], "fail": summary["fail"],
         "skipped": summary["skipped"], "total": summary["total"],
     }
+    # Sổ cost cộng dồn work/cost.json: mỗi pass tiêu tiền = 1 entry (entry <= 0 tự bỏ).
+    # Tổng sổ = chi thực của cuốn qua MỌI pass — hết cảnh grep dòng cost~$ cuối mỗi log.
+    cost_ledger.append_entry(bp.work_dir, "prepass", {"cost_usd": prepass_cost})
+    cost_ledger.append_entry(bp.work_dir, "ocr", summary)
     # prepass_cost: full thường = cache hit (0). carried_cost: prepass đã tiêu ở smoke.
     total_prepass_cost = prepass_cost + carried_cost
     cost = (collector.cost_usd() if collector else summary["cost_usd"]) + total_prepass_cost
@@ -498,11 +518,22 @@ def run_full_pipeline(
     if summary["blank"] > 0:
         print(f"OCR: {summary['blank']} blank page → placeholder, tiếp tục build.", file=human_out)
 
+    # Trang DEAD placeholder (fail deterministic pass trước) vô hình trong EPUB —
+    # phải la to ở build-time, nếu không sách "DONE" mà thiếu nội dung không ai biết.
+    dead_pages = ocr.list_dead_pages(bp.ocr_dir)
+    if dead_pages:
+        print(f"⚠ {len(dead_pages)} trang DEAD placeholder (OCR FAILED, THIẾU nội dung): "
+              f"{', '.join(dead_pages)} — muốn cứu: xoá work/ocr/<trang>.md rồi chạy lại.",
+              file=sys.stderr)
+
     built = _build_book(bp, bp.scans_dir, meta)
     stats = built["stats"]
     print(f"Merged: {stats['pages_merged']} pages, {stats['chars']} chars, h1={stats['h1']} h2={stats['h2']} footnotes={stats['footnotes']}", file=human_out)
     size_kb = built["epub_result"]["size_bytes"] // 1024
     print(f"✓ {built['book_epub']} ({size_kb}KB)", file=human_out)
+    ledger_total = cost_ledger.total(bp.work_dir)
+    if ledger_total > 0:
+        print(f"Chi phí cộng dồn cuốn này (work/cost.json): ${ledger_total:.4f}", file=human_out)
     paths["book_md"] = str(built["book_md"].resolve())
     paths["epub_path"] = str(built["book_epub"].resolve())
 
@@ -513,9 +544,12 @@ def run_full_pipeline(
         paths["uploaded"] = f"{args.remote}:{args.folder}/{rename}"
 
     if mode == "json":
+        extra = {"prepass_cost_usd": round(total_prepass_cost, 4)}
+        if dead_pages:
+            extra["dead_pages"] = dead_pages
         json_output.print_summary(json_output.build_summary(
             stage="all", status="ok", pages=pages, cost_usd=cost, paths=paths,
-            extra={"prepass_cost_usd": round(total_prepass_cost, 4)}))
+            extra=extra))
     return 0
 
 
@@ -543,7 +577,13 @@ def run_smoke_gate(args, bp: BookPaths, meta, mode, human_out, api_key):
         api_key=api_key, input_dir=bp.scans_dir, output_dir=bp.ocr_dir,
         model=args.model, workers=args.workers, pattern=IMAGE_PATTERNS,
         limit=10, max_tokens=args.max_tokens, on_event=on_event, prompt_context=block,
+        lang=meta.get("lang"),
     )
+    # Sổ cost: smoke cũng tiêu tiền thật (prepass one-off + ≤10 trang OCR). Full
+    # pass sau đó là cache-hit ($0, entry <=0 tự bỏ) — không ghi ở đây thì tổng sổ
+    # under-count đúng phần carried_cost tồn tại để bù.
+    cost_ledger.append_entry(bp.work_dir, "smoke-prepass", {"cost_usd": prepass_cost})
+    cost_ledger.append_entry(bp.work_dir, "smoke-ocr", summary)
     if summary["fail"] > 0:
         # Smoke fail ngay → đừng ước cost / gate, báo lỗi để user sửa input/key.
         if mode == "json":

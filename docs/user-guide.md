@@ -81,6 +81,8 @@ Sách giấy cần được scan thành PNG, JPG, HEIC hoặc HEIF, mỗi trang 
 
 Ngoài ảnh scan, bạn cũng có thể bắt đầu từ một file PDF của sách (chẳng hạn từ Calibre hoặc scan PDF từ app scanner). Pipeline sẽ render từng trang PDF thành JPG rồi chạy qua OCR pipeline bình thường — không trích text layer (PDF born-digital thường có encoding hỏng).
 
+**`--dpi` (mặc định 150).** DPI render quyết định kích thước ảnh gửi OCR → quyết định chi phí token. Nếu PDF là scan có ảnh nhúng độ phân giải thấp (ví dụ 1024px ngang, phổ biến ở sách scan cũ), render 150 DPI sẽ **phóng to** ảnh (~2134px) — không thêm thông tin mà payload OCR to hơn ~2.6×. Kiểm cỡ ảnh gốc bằng `pdfimages -list book.pdf`; nếu ≤~1024px ngang thì `--dpi 72` cho ra đúng pixel gốc, rẻ hơn ~12% mà chất lượng OCR tương đương. Đo thật (2 sách): median line similarity 99.6%, char delta 0.0%. Sách gốc phân giải cao thì giữ 150.
+
 Hoặc dùng **Google Drive file link**. Nếu bạn đã upload file PDF lên Google Drive và chia sẻ công khai ("Bất kỳ ai có link" hoặc "Public"), pipeline tự động tải xuống (temp file), validate là PDF thực sự, rồi xử lý như file PDF local. Chỉ hỗ trợ FILE link (không folder link hoặc URL bất kỳ). Ví dụ: `https://drive.google.com/file/d/1RAG...nOA/view?usp=drivesdk`
 
 Cách nhanh nhất: dùng lệnh `init` để tạo inbox + import ảnh + rename tự động (xem mục "Tạo inbox nhanh" bên dưới). Pipeline dùng **natural-sort** nên tên file không bắt buộc zero-pad — `page_5.png`..`page_80.png` vẫn sort đúng số học. Tuy vậy đặt `page_001.png`, `page_002.png`... vẫn gọn và dễ đọc hơn.
@@ -95,6 +97,8 @@ done
 ```
 
 Pipeline nhận cả **PNG, JPG/JPEG, HEIC, HEIF, PDF**. Ảnh được xử lý bằng cách chuyển đổi HEIC/HEIF qua chain backend (sips macOS → magick ImageMagick → heif-convert → pillow-heif, first available). File PDF được render từng trang thành JPG qua backend-chain: pdftoppm (poppler) → magick (ImageMagick + Ghostscript) → sips (macOS, single-page fallback). **PDF render strategy**: Luôn render→OCR (không trích text layer), vì PDF born-digital (Calibre, Quartz) thường có ToUnicode CMap hỏng → pdftotext yield ký tự rác, trong khi ảnh render qua vision model OCR sạch. Xử lý nhất quán cả PDF scan lẫn PDF text-layer-broken. Cross-platform: Windows/macOS/Linux tất cả supported. Nếu NO backend available (HEIC/PDF), raise error (mất trang = sách hỏng, never skip silent). Lệnh `doctor` check backend: HEIC convert (non-essential, warning only nếu thiếu — chỉ cần khi input HEIC), PDF render (non-essential, warning only nếu thiếu — chỉ cần khi input PDF).
+
+**File rác của filesystem tự động bỏ qua.** Khi scans/ nằm trên ổ exFAT/FAT/SMB (ổ ngoài, NAS), macOS đẻ kèm file AppleDouble `._page_NNN.jpg` cho mỗi ảnh — cùng đuôi ảnh nên từng lọt glob và bị gửi lên OCR (API trả HTTP 400 "image format is illegal", đội fail-rate + tốn tiền retry). Pipeline nay lọc sạch `._*`, `.DS_Store`, `Thumbs.db` tại chỗ phát hiện ảnh (cả nhánh OCR lẫn manga), nên chạy trực tiếp từ ổ ngoài an toàn.
 
 DPI tối thiểu khuyến nghị là 300 DPI cho text rõ ràng. Vision model tolerate được DPI thấp hơn nhưng dấu Việt có thể đoán sai.
 
@@ -146,9 +150,15 @@ scan2ebook init chuyen-thu --from ~/Books/book.pdf \
 # Hoặc từ Google Drive file link công khai
 scan2ebook init mybook --from "https://drive.google.com/file/d/1RAGxunS5cgjCM6qbxvHG84gMuWrZ_nOA/view?usp=drivesdk" \
   --title "Tiêu đề sách" --author "Tác giả"
+
+# Sách tiếng Nhật (prose pipeline, kích hoạt OCR dọc + RTL spread handling)
+scan2ebook init japanese-novel --from ~/Books/scans/ \
+  --title "花子物語" --author "田中太郎" --lang ja
 ```
 
 Kết quả: tạo `~/scan2ebook/{slug}/scans/`, copy + natural-sort + rename ảnh từ `--from` thành `page_001.<ext>`..., và ghi `metadata.json` vào `scans/`. Nếu `--from` là PDF (local hoặc Drive link), pipeline render từng trang thành `page_NNN.jpg` rồi đặt vào scans/. HEIC/HEIF file tự động convert→JPG trong quá trình này (EXIF + orientation được giữ nguyên). Override data root bằng `--home`.
+
+**`--lang` parameter**: Đặt ngôn ngữ sách (mặc định `vi` cho tiếng Việt). Pipeline dùng ngôn ngữ để chọn OCR prompt chuyên biệt. `--lang ja` dùng cho sách tiếng Nhật (novels, essays) — kích hoạt OCR dọc (tategaki), đọc phải→trái, bỏ qua chrome app (menu bar, header, footer, dock), và render guidance "đọc trang PHẢI trước rồi trang TRÁI" cho ảnh trang đôi. Lưu ngôn ngữ vào `metadata.json` — lệnh `all` đọc tự động và chọn đúng prompt cho pipeline. **Lưu ý**: `--lang ja` này dành cho OCR prose pipeline (sách dọc thường). Riêng manga dùng lệnh `scan2ebook manga` (pipeline khác, không OCR, fixed-layout).
 
 Bỏ `--from` nếu muốn tự copy ảnh sau (lệnh chỉ tạo folder + metadata mẫu). `metadata.json` đã tồn tại sẽ được giữ nguyên, không ghi đè. Nếu `scans/` đã có file `page_*`, `init --from` sẽ báo lỗi (rc=2) thay vì import — xoá page cũ trước rồi chạy lại, tránh để lại page rác bị OCR nhầm (tốn tiền).
 
@@ -398,6 +408,8 @@ Mực mờ (sách cũ): tăng exposure +1 stop khi scan. Vision model tolerate m
 
 Trang trống (bìa, divider): để nguyên trong inbox. Pipeline tự nhận diện trang trống thật (response rỗng + `finish_reason=stop`) và ghi placeholder `<!-- blank page -->`, **không cần can thiệp tay**, không tính là fail.
 
+Trang chết (provider trả lỗi Y HỆT mỗi lần retry — deterministic): pipeline early-abort và ghi placeholder `<!-- OCR FAILED (deterministic) — cần xử lý tay: ... -->` để các lần chạy sau không OCR lại vô ích. CHỈ loại deterministic này bị placeholder — fail vì hết credit (402), lỗi config (403), hay nghẽn tạm hết vòng retry thì trang vẫn để trống, chạy lại sẽ OCR tiếp. Trang chết vẫn đếm là fail trong summary, và khi build `all` sẽ **cảnh báo to danh sách trang thiếu nội dung** (cả trong JSON qua `dead_pages`). Cả 2 loại placeholder là HTML comment nên **vô hình trong EPUB**. Muốn thử cứu trang: xoá file `work/ocr/page_NNN.md` tương ứng rồi rerun — chỉ trang đó bị OCR lại.
+
 ## Scripting & JSON output
 
 Cho agent/CI integration, dùng `--json` hoặc `--json-lines` trên `ocr` / `all` để output machine-readable format (human logs sang stderr).
@@ -421,6 +433,7 @@ scan2ebook ocr ~/Books-inbox/namphong-q01 ~/output/ocr --json-lines > events.ndj
 | `scan2ebook doctor` | Self-check môi trường (python/pandoc/key/rclone) |
 | `scan2ebook doctor --json` | Self-check, JSON output |
 | `scan2ebook init <slug> --from <dir\|book.pdf\|drive-link>` | Tạo book + scans zone + import ảnh / render PDF / tải Drive + metadata mẫu |
+| `scan2ebook init <slug> --from <dir> --lang ja` | Init với ngôn ngữ Nhật (OCR dọc, RTL spread, vi mặc định) |
 | `scan2ebook manga <slug> --from <dir\|.mobi\|.cbz\|drive-url>` | Build EPUB3 fixed-layout RTL manga (4 input forms); slug = folder name hoặc path |
 | `scan2ebook manga <slug> --series "Pluto" --series-index 2` | Manga với auto series-title (dc:title = "Pluto 02") |
 | `scan2ebook manga <slug> --auto-cover` | Auto-detect bìa qua vision LLM (cần OPENROUTER_API_KEY) |
@@ -434,9 +447,13 @@ scan2ebook ocr ~/Books-inbox/namphong-q01 ~/output/ocr --json-lines > events.ndj
 | `scan2ebook ocr <slug-or-path> <out> --max-tokens 16000` | Tăng trần output cho trang text rất dày |
 | `scan2ebook ocr <slug-or-path> <out> --model <id>` | Đổi vision model (hoặc đặt env `OCR_MODEL`) |
 | `scan2ebook ocr <slug-or-path> <out> --json` | JSON summary output |
+| `scan2ebook ocr <slug-or-path> <out> --no-context` | OCR bằng base prompt (bỏ context block cache) |
+| `scan2ebook ocr <slug-or-path> <out> --context <file>` | Dùng file text làm context block (override cache) |
 | `scan2ebook post <ocr-dir> <book.md> --title "..."` | Stage 2: merge → book.md |
 | `scan2ebook epub <book.md> <book.epub>` | Stage 3: build epub (cover từ auto-detect hoặc cover.jpg) |
 | `scan2ebook epub <book.md> <book.epub> --cover <path>` | Override cover (one-off, không lưu vào context) |
+| `scan2ebook verify <path>...` | Kiểm tra EPUB: OK/TINY/BADZIP/MISSING; nhận .epub, book-home, hoặc thư mục nhiều book-home; rc 0 khi tất cả OK |
+| `scan2ebook verify <dir> --json` | Kết quả verify dạng JSON |
 | `scan2ebook upload <book.epub>` | Stage 4: rclone → Drive |
 | `scan2ebook upload <book.epub> --rename "..."` | Rename khi upload |
 | `scan2ebook all <slug>` | 3 stage chain (slug-or-path) |
@@ -444,5 +461,6 @@ scan2ebook ocr ~/Books-inbox/namphong-q01 ~/output/ocr --json-lines > events.ndj
 | `scan2ebook all <slug> --smoke` | Cost gate: OCR 10 trang + mini epub + confirm |
 | `scan2ebook all <slug> --smoke --yes` | Cost gate + bypass prompt (agent mode) |
 | `scan2ebook all <slug> --home <path>` | Custom data root |
+| `scan2ebook all <slug> --skip-prepass` | Bỏ pre-pass (sách bị moderation chặn ảnh mẫu); rebuild 0-todo tự bỏ pre-pass, không cần flag |
 | `scan2ebook all <slug> --json` | JSON summary output |
 | `scan2ebook all <slug> --json-lines` | NDJSON stream output (progress + summary) |

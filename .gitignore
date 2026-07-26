@@ -41,3 +41,9 @@ venv/
 # Public demo/review outputs (curated, intentionally tracked despite *.epub / output/ above)
 !samples/
 !samples/**
+
+# Personal illustration prompts (contain copyrighted story summaries: keep out of public repo)
+docs/illustration-prompts/
+
+# Personal ops docs (local machine paths, drive layout, cross-repo coordination)
+docs/private/

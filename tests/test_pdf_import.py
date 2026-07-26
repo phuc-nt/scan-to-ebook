@@ -87,9 +87,9 @@ def test_import_pdf_no_backend_raises_naming_file(tmp_path, monkeypatch):
 
 # -------------------------------------------------------------- cmd_init routing
 
-def _init_args(slug, from_dir, home):
+def _init_args(slug, from_dir, home, dpi=pdf_render.DEFAULT_DPI):
     return argparse.Namespace(
-        slug=slug, from_dir=from_dir, home=home,
+        slug=slug, from_dir=from_dir, home=home, dpi=dpi,
         title=None, author=None, lang="vi", year=None,
     )
 
@@ -104,6 +104,46 @@ def test_init_from_pdf_routes_to_import_pdf(tmp_path, monkeypatch, capsys):
     scans = tmp_path / "home" / "mybook" / "scans"
     assert [p.name for p in sorted(scans.glob("page_*"))] == ["page_001.jpg", "page_002.jpg"]
     assert "Rendered 2 trang PDF" in capsys.readouterr().out
+
+
+def test_init_dpi_flag_reaches_renderer(tmp_path, monkeypatch):
+    """--dpi phải đi tới render_pdf_to_images, không dừng ở argparse.
+
+    Scan nguồn 1024px render 150 DPI = phóng to 2× → payload OCR gấp ~2.6× mà
+    không thêm thông tin. Cờ đứt quãng = âm thầm trả tiền thừa, không lỗi nào
+    báo → phải khoá bằng test."""
+    seen: list[int] = []
+    monkeypatch.setattr(pdf_render, "available_backends", lambda: ["pdftoppm"])
+
+    def fake_render(pdf, out_dir, dpi=pdf_render.DEFAULT_DPI):
+        seen.append(dpi)
+        p = out_dir / f"{pdf_render._RENDER_PREFIX}-001.jpg"
+        p.write_bytes(b"\xff\xd8\xff\xe0x")
+        return [p]
+
+    monkeypatch.setattr(pdf_render, "render_pdf_to_images", fake_render)
+    pdf = tmp_path / "book.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+    assert cli.cmd_init(_init_args("mybook", pdf, tmp_path / "home", dpi=72)) == 0
+    assert seen == [72]
+
+
+def test_init_dpi_defaults_when_flag_absent(tmp_path, monkeypatch):
+    """Không truyền --dpi → giữ DEFAULT_DPI (không đổi hành vi sách cũ)."""
+    seen: list[int] = []
+    monkeypatch.setattr(pdf_render, "available_backends", lambda: ["pdftoppm"])
+
+    def fake_render(pdf, out_dir, dpi=pdf_render.DEFAULT_DPI):
+        seen.append(dpi)
+        p = out_dir / f"{pdf_render._RENDER_PREFIX}-001.jpg"
+        p.write_bytes(b"\xff\xd8\xff\xe0x")
+        return [p]
+
+    monkeypatch.setattr(pdf_render, "render_pdf_to_images", fake_render)
+    pdf = tmp_path / "book.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+    assert cli.cmd_init(_init_args("mybook", pdf, tmp_path / "home")) == 0
+    assert seen == [pdf_render.DEFAULT_DPI]
 
 
 def test_init_from_nonexistent_nonpdf_errors(tmp_path):

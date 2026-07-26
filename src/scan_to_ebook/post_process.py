@@ -105,18 +105,59 @@ def strip_code_fences(text: str) -> str:
     return text
 
 
+# ATX heading thiếu space sau dấu #: `##幽霊の家` (model CJK hay bỏ space ASCII).
+# CommonMark BẮT BUỘC space sau # → không có thì pandoc render thành text thường,
+# mất heading + mất split point. Chuẩn hoá `#`/`##` (≤6) liền ký tự non-# → chèn space.
+_ATX_NO_SPACE = re.compile(r"^(#{1,6})(?=[^#\s])")
+
+# Thematic break kiểu dấu gạch: dòng CHỈ gồm ≥3 dấu `-` (cho phép khoảng trắng xen,
+# vd `---`, `----`, `- - -`). OCR bản scan cổ hay sinh dòng gạch ngang phân cách /
+# footnote → merged body dính nhiều dòng `---`. pandoc coi `---…---` (sau dòng trống)
+# là KHỐI YAML metadata; nếu bên trong có `: ` → rc=64 "mapping values are not allowed"
+# (bug thật batch3: 5 cuốn vỡ, vd khai-hung-than-the-va-tac-pham). Đổi sang `* * *`
+# (thematic break pandoc KHÔNG nhầm với YAML). Chỉ khớp dạng dấu gạch — `***`/`___`
+# vốn đã an toàn nên không đụng.
+_DASH_THEMATIC_BREAK = re.compile(r"^\s*-(?:\s*-){2,}\s*$")
+
+
+def _normalize_thematic_breaks(text: str) -> str:
+    """Đổi dòng thematic-break dấu gạch (`---`, `----`, `- - -`) → `* * *`.
+
+    Ngăn pandoc hiểu nhầm `---` giữa body là mở/đóng khối YAML metadata. Bỏ qua dòng
+    trong fenced code block (``` … ```) — ở đó `---` là literal, không phải separator.
+    """
+    out_lines = []
+    in_fence = False
+    for line in text.splitlines():
+        if CODE_FENCE_OPEN.match(line) or CODE_FENCE_CLOSE.match(line):
+            in_fence = not in_fence
+            out_lines.append(line)
+            continue
+        if not in_fence and _DASH_THEMATIC_BREAK.match(line):
+            out_lines.append("* * *")
+        else:
+            out_lines.append(line)
+    return "\n".join(out_lines)
+
+
+def _normalize_atx_heading(stripped: str) -> str:
+    """`##幽霊の家` → `## 幽霊の家`. Dòng không phải ATX heading: trả nguyên."""
+    return _ATX_NO_SPACE.sub(r"\1 ", stripped)
+
+
 def upgrade_chapter_headings(text: str) -> str:
     """Detect chapter line, upgrade thành `# Title` (h1, pandoc split point)."""
     out_lines = []
     for line in text.splitlines():
-        stripped = line.strip()
+        stripped = _normalize_atx_heading(line.strip())
         if stripped.startswith("# ") or stripped.startswith("## "):
             if stripped.startswith("## "):
                 body = stripped[3:].strip()
                 if _is_chapter_heading(body):
                     out_lines.append(f"# {body}")
                     continue
-            out_lines.append(line)
+            # giữ heading đã chuẩn-hoá (vd `##幽霊の家`→`## 幽霊の家`), KHÔNG dùng line gốc.
+            out_lines.append(stripped)
             continue
         if _is_chapter_heading(stripped):
             out_lines.append(f"# {stripped}")
@@ -125,14 +166,25 @@ def upgrade_chapter_headings(text: str) -> str:
     return "\n".join(out_lines)
 
 
+def _yaml_scalar(value: str) -> str:
+    """Escape 1 giá trị thành YAML scalar an toàn cho front matter.
+
+    Giá trị nhét thô vỡ pandoc khi chứa ký tự cấu trúc YAML — thực tế: title sách VN
+    "Ăn Cơm Mới, Nói Chuyện Cũ: Hậu Giang - Ba Thắc" có dấu `:` → pandoc rc=64
+    "mapping values are not allowed". Luôn double-quote + escape `\\` và `"` để phủ mọi
+    ký tự đặc biệt (`:`, `#`, `-` đầu dòng, `[`, `{`...) trong 1 cách nhất quán."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def build_front_matter(title: str, author: str | None, lang: str, year: str | None) -> str:
     """Pandoc YAML front matter cho epub metadata."""
-    lines = ["---", f"title: {title}"]
+    lines = ["---", f"title: {_yaml_scalar(title)}"]
     if author:
-        lines.append(f"author: {author}")
-    lines.append(f"lang: {lang}")
+        lines.append(f"author: {_yaml_scalar(author)}")
+    lines.append(f"lang: {_yaml_scalar(lang)}")
     if year:
-        lines.append(f"date: {year}")
+        lines.append(f"date: {_yaml_scalar(str(year))}")
     lines.append("---\n")
     return "\n".join(lines)
 
@@ -164,6 +216,8 @@ def merge_pages(
 
     merged = "\n\n".join(chunks)
     merged = upgrade_chapter_headings(merged)
+    # Đổi thematic-break dấu gạch `---` giữa body → `* * *` (pandoc không nhầm YAML).
+    merged = _normalize_thematic_breaks(merged)
 
     h1_count = sum(1 for line in merged.splitlines() if line.startswith("# "))
     h2_count = sum(1 for line in merged.splitlines() if line.startswith("## "))

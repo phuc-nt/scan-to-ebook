@@ -2,21 +2,13 @@
 
 ## Cost management
 
-OpenRouter charge theo token in/out. Qwen 3.7-Plus (default, 6/2026) là $0.40/M input token và $1.60/M output token. Một trang A4 tiếng Việt bình quân 1421 input token (prompt + ảnh base64) và 4000–6000 output token (markdown trang). Cost trung bình ~$0.004/trang với Qwen. Gemini 3.1 Pro (cao hơn 15×) là $2.5/M in, $10/M out (~$0.05/trang).
+OpenRouter charge theo token in/out. Qwen 3.7-Plus (default) là $0.40/M input, $1.60/M output. **Số đo thực tế trên 41.191 trang (batch 3, 181 cuốn): ~$0,0033/trang, ~$0,75/cuốn** — sách 300 trang ≈ $1, nhóm ~14k trang ≈ $45–48. Gemini 3.1 Pro đắt ~15× ($0.05/trang), chỉ dùng backup cho trang Qwen chịu thua.
 
-Cost per book ước tính theo số trang. Sách 100 trang khoảng $5, 200 trang $10, 500 trang $25. Tăng đột biến (output token gấp 2–3) gặp ở trang nhiều text dày, footnote nhiều, hoặc trang chứa table phức tạp.
+Pipeline in cost ước tính cuối stage 1 (dòng `cost~$` cuối log). Lưu ý: **dòng cost cuối mỗi cuốn KHÔNG phải tổng cộng dồn** — mỗi pass (all-1, retry, all-2) in cost riêng cho trang pass đó xử lý; chi thực = tổng mọi dòng cost mọi pass (group3: $48.43 thực vs $43.86 theo dòng cuối).
 
-Pipeline in cost ước tính cuối stage 1, dòng cuối log. Số này không bao gồm các page bị fail (retry không charge khi error response, nhưng có thể charge khi response thành công về client với empty content).
+`--workers` mặc định 12; chạy 1 cuốn đơn lẻ 12–24 đều ổn (verified 331 trang, 0 fail). Chạy nhiều sách song song xem section "Batch OCR" bên dưới — 192 concurrent trên 1 key vẫn không bị throttle. Trang text-dày thỉnh thoảng "stutter" (1 trang nổ 12k–25k output token, latency 200–450s) — với nhiều worker, trang nổ không khoá batch, cứ để nó chạy.
 
-Để giảm cost, có thể.
-
-Qwen 3.7-Plus (default) là lựa chọn rẻ nhất. Nếu muốn thử cheaper hơn nữa, `--model openai/gpt-4o-mini` cost ~$0.01/page nhưng chất lượng dấu Việt yếu hơn — verify trước. Sách cổ hiếm nay dùng Qwen 3.7-Plus (verified trên Nam Phong 1917: giữ nguyên chính tả cũ như "văn-chương", "nhời").
-
-`--workers` mặc định 12 (parallel OCR), retry 4 lần backoff trên 429 — đủ saturate paid tier mà vẫn 0-fail trên sách lớn (verified: 331 trang, 12 worker, 0 fail). Trang text-dày thỉnh thoảng "stutter" — model lặp/lạc trong lúc sinh, nổ output token (vd 1 trang ra 12k–25k token, latency 200–450s) dù nội dung trang bình thường; với nhiều worker, trang nổ không khoá batch. Giảm `--workers` xuống 4–8 (hoặc thấp hơn) nếu OpenRouter rate-limit hit gây retry tốn cost; tăng cao hơn 12 chỉ khi key chịu được — quá ngưỡng rate-limit thì 429 làm chậm hơn cả tăng tốc.
-
-Crop ảnh PNG trước khi OCR. Giảm pixel = giảm token input. ImageMagick `mogrify -trim` cắt viền trắng tự động. Có thể tiết kiệm 10–20% input cost.
-
-Dùng JPG thay PNG cho ảnh chụp (vFlat output PNG mặc định). JPG quality 85 nhỏ hơn PNG ~50% nhưng vision model không phân biệt được. Lưu ý: chỉ apply cho ảnh chụp, không cho scan flat-bed.
+Tips giảm cost: `--dpi 72` khi nguồn là PDF scan ~1024px (default 150 DPI upscale 2× vô ích, đắt hơn ~12%); crop viền trắng (`mogrify -trim`, tiết kiệm 10–20% input); JPG q85 thay PNG cho ảnh chụp (nhỏ hơn ~50%, vision model không phân biệt).
 
 ## OpenRouter credit và key cap
 
@@ -30,29 +22,17 @@ Pipeline phân biệt 2 lỗi trong log. HTTP 402 nghĩa là nạp credit. HTTP 
 
 Tip thực tế: tạo riêng 1 OpenRouter key cho pipeline với cap $50–100, không dùng chung key research/dev khác. Phân biệt cost rõ trong analytics dashboard.
 
-## Blank page
+## Trang trống & trang chết — pipeline TỰ xử lý
 
-Một số trang sách thực sự blank: cover sau, divider giữa các chương, separator giữa các phần. Gemini correctly trả về `empty content (finish_reason=stop)` cho những trang này — không có text để OCR. Pipeline detect empty và raise RuntimeError, count vào failures.
+Hai loại trang "không ra text" đều được tự động hoá, không cần can thiệp tay:
 
-Sau khi pipeline báo failure cho blank page, mở ảnh xem có thực sự blank không.
+**Trang trống thật** (bìa sau, divider): model trả rỗng + `finish_reason=stop` → pipeline tự ghi `<!-- blank page -->`, đếm là `blank` (KHÔNG phải fail), pass sau skip. Không retry trang trắng.
 
-```bash
-open ~/scan2ebook/<slug>/scans/page_065.png
-```
+**Trang chết deterministic** (provider trả rỗng/malformed y hệt mỗi lần): retry loop so sánh *error class* giữa các lần — cùng class lặp 2 lần → **early-abort** (không đợi hết retry), tự ghi `<!-- OCR FAILED (deterministic) — cần xử lý tay: <lý do> -->`. Trang vẫn đếm là `fail` (summary trung thực) nhưng có file `.md` size>0 nên **các pass sau skip, không ôm lại vòng retry**. Trước fix này, 1 trang chết kéo cả cuốn tới 8521s; sau fix, cuốn tệ nhất group3 chỉ 1966s.
 
-Nếu thực sự blank, tạo placeholder thủ công để pipeline skip ở lần rerun.
+Muốn thử OCR lại một trang có placeholder (trắng oan / muốn cứu trang chết): xoá file `work/ocr/page_NNN.md` tương ứng rồi rerun `scan2ebook all <slug>` — chỉ trang đó bị OCR lại, phần còn lại $0.
 
-```bash
-echo '<!-- blank page -->' > ~/scan2ebook/<slug>/work/ocr/page_065.md
-```
-
-Sau đó rerun để stage 1 skip trang đã có placeholder, và stage 2+3 chạy bình thường.
-
-```bash
-scan2ebook all <slug>
-```
-
-Nếu trang KHÔNG blank nhưng pipeline vẫn báo empty content, có 2 khả năng. Một là vision model gặp safety filter (rare cho text Việt nhưng có thể gặp với sách political/religious). Hai là ảnh quá tối/quá mờ, model không đọc được. Thử rescan với DPI cao hơn, hoặc đổi model qua `--model anthropic/claude-opus-4`.
+Nếu trang KHÔNG blank mà vẫn bị báo rỗng liên tục: hoặc safety filter (sách war/political — xem "Moderation-block" ở section Batch), hoặc ảnh quá mờ — rescan DPI cao hơn hay đổi model backup.
 
 ## Rclone setup
 
@@ -120,7 +100,7 @@ Khi đổi model, smoke test 10 trang trước khi commit full pipeline. Output 
 
 Prompt OCR ở `src/scan_to_ebook/ocr.py`, biến `PROMPT`. Đã verified zero error trên Nam Phong 1917 với Gemini 3.1 Pro. Đừng đổi nếu không có lý do rõ.
 
-Lý do hợp lệ để tune prompt: ngôn ngữ khác (English, Japanese), genre rất khác (math heavy với LaTeX, music score), layout đặc biệt (newspaper 4 cột).
+Lý do hợp lệ để tune prompt: ngôn ngữ khác (English ngoại trừ Japanese, math heavy với LaTeX, music score), layout đặc biệt (newspaper 4 cột). **Tiếng Nhật là FIRST-CLASS**: dùng `--lang ja` khi init — pipeline sẽ dùng dedicated `JA_PROMPT` (xử lý tategaki/dọc, đọc phải→trái, bỏ qua app chrome), context-prepass `CONTEXT_PROMPT_JA` (phát hiện đúng spread RTL), và post-process chuẩn hóa space-less ATX headings. Không cần manual prompt tuning cho tiếng Nhật.
 
 Quy trình tune. Một là branch riêng. Hai là edit `PROMPT`. Ba là smoke test 10–20 trang trên một cuốn có ground truth (ví dụ `samples/demo-scans/`, hoặc tự build fixture từ sách bạn sở hữu). Bốn là so diff với version cũ qua `git diff` hoặc dùng tool diff trực quan. Năm là chỉ merge khi diff acceptable (không corrupt chữ nào, không drop dấu).
 
@@ -221,6 +201,73 @@ Pipeline detects + hints at install if absent.
 **min_px filter too aggressive** — small images (<400px) dropped with warning. Raise limit: `--min-px 200` to keep tiny art. Warn logged but visual impact hard to assess without reader.
 
 **EPUB validation fails** — `.epub` must validate structurally (7 stdlib checks). If error: check that ALL images in `scans/` are readable (try `file scans/*.jpg`) and exist in OPF manifest before rebuild.
+
+## Batch OCR nhiều sách song song
+
+Khi phải OCR cả một hàng đợi lớn (hàng trăm cuốn PDF scan), không chạy tay từng cuốn. Chia thành các **đợt (batch)**, mỗi đợt tách thành **nhóm theo ngân sách** (vd ~$50/nhóm — giới hạn credit dễ kiểm soát), chạy 1 nhóm một lần và xác nhận credit giữa các nhóm. Quy trình dưới đây đã verified trên một đợt thực tế 181 cuốn / ~41k trang (~$0,0033/trang với qwen3.7-plus + `--dpi 72`).
+
+### Tổ chức workdir
+
+Mỗi cuốn một book-home chuẩn của pipeline, gom dưới 1 thư mục gốc (đặt ở đâu tuỳ bạn — ổ ngoài OK, pipeline đã lọc sidecar exFAT):
+
+```
+<BATCH_ROOT>/
+├── group<N>-slugs.csv                 # input: tối thiểu slug,title,authors,pdf_path
+├── books/<slug>/{scans,work,dist}/    # workdir mỗi cuốn (init tạo)
+└── logs/<slug>-{init,all-N,retry-N}.log
+```
+
+### Bước 1 — Chạy nhóm bằng N-lane parallel driver
+
+```bash
+OPENROUTER_API_KEY=sk-... nohup python3 tools/batch_ocr_runner.py \
+  --csv <BATCH_ROOT>/group1.csv --home <BATCH_ROOT>/books \
+  --log-dir <BATCH_ROOT>/logs --lanes 8 --workers 24 --dpi 72 \
+  > <BATCH_ROOT>/group1-run.log 2>&1 &
+```
+
+Nguyên tắc thiết kế (`tools/batch_ocr_runner.py --help` tự đủ):
+- N lane rút sách từ **1 queue chung** → không cuốn nào bị 2 lane đụng (không collision file).
+- Mỗi cuốn: `init --from <pdf> --dpi 72 --author --title` (skip nếu đã có scans) → `all --yes` × 2 pass, giữa 2 pass chạy `ocr` retry (tự nạp context cache); pass `all` cuối tự bỏ pre-pass khi 0 trang cần OCR → sách bị moderation chặn ảnh mẫu vẫn tự ra EPUB.
+- Kết quả phân loại rõ: `DONE | DONE(dead=N) | WARN(no-epub) | WARN(init-fail) | STOP(402)` — không còn WARN hộp đen. `DONE(dead=N)` = EPUB build được nhưng THIẾU N trang (dead placeholder vô hình trong EPUB); muốn cứu: xoá `work/ocr/<trang>.md` rồi rerun `all --yes` (danh sách trang trong log `all` cuối).
+- **Circuit breaker 402 trong 1 cuốn**: trang đầu tiên dính 402 → các trang còn lại của cuốn bỏ qua tại chỗ (không bắn call chết từng trang), để trống cho lần resume sau nạp credit.
+- **8 lane × 24 worker = 192 concurrent trên 1 key là an toàn** — verified: 34 cuốn / ~14.6k trang trong 79 phút, speedup 7.2x, chỉ 2 lần 429 lẻ. `qwen3.7-plus` không throttle ở mức này.
+- **`--dpi 72` khi scan nguồn ~1024px**: default 150 DPI upscale 2× vô ích, đắt hơn ~12%.
+- **HTTP 402 ở bất cứ lane nào → dừng nhận việc mới.** 402 = hết credit (KHÔNG phải lỗi sách). Nạp credit rồi rerun — OCR cache khiến resume chỉ làm trang còn thiếu, trang xong = $0.
+
+### Bước 2 — Sau khi driver kết thúc: rebuild WARN + validate
+
+Cuốn báo `WARN` (thay vì `DONE`) là cuốn `all` không ra được EPUB ở pass cuối nhưng md thường đã đủ. Kiểm md (`ls books/<slug>/work/ocr/*.md | wc -l` so với số scan) rồi rebuild ($0, dùng md cache):
+
+```bash
+SCAN2EBOOK_HOME=<BATCH_ROOT>/books scan2ebook all <slug> --yes
+```
+
+**Moderation-block (sách chiến tranh, ảnh nhạy cảm):** provider từ chối ảnh SAMPLE ở context pre-pass (`data_inspection_failed` HTTP 400). Pipeline tự xử lý: khi **0 trang cần OCR** (rebuild từ md cache), `all` bỏ qua pre-pass hẳn → rebuild sách moderation-block chỉ là `all <slug> --yes`. Nếu sách còn trang dở dang mà pre-pass vẫn bị chặn: `all <slug> --yes --skip-prepass` (trang còn lại OCR bằng base prompt + cache context nếu có).
+
+Nếu vẫn cần build 2 stage tay (pipeline cũ), nhớ: **KHÔNG truyền `--pattern "*.md"` vào `post` trên ổ exFAT** — nó nhặt cả sidecar `._page_*.md` → UnicodeDecodeError (byte 0xb0). Default `page_*.md` tự loại `._`.
+
+**Validate bằng `scan2ebook verify`** (zipfile.testzip bên dưới — KHÔNG dùng vòng lặp shell `unzip -t`: bash mis-split CSV có dấu phẩy trong field, zsh `if cmd >/dev/null` nuốt exit code, âm thầm skip):
+
+```bash
+scan2ebook verify <BATCH_ROOT>/books        # cả thư mục book-homes
+scan2ebook verify books/<slug>              # 1 cuốn
+# per-file: OK/TINY/BADZIP/MISSING + summary; rc 0 chỉ khi tất cả OK
+```
+
+### Bước 3 — Dọn TOC rác + rebuild cuốn bị đổi
+
+```bash
+python3 tools/fix_toc_junk.py --home <BATCH_ROOT>/books --csv group1.csv
+# in danh sách SLUGS đã sửa → rebuild CHỈ các cuốn đó ($0):
+SCAN2EBOOK_HOME=<BATCH_ROOT>/books scan2ebook all <slug> --yes
+```
+
+OCR biến trang "MỤC LỤC" của sách thành heading (pandoc tự sinh TOC → trùng) + chữ trên bìa thành `## <title>`/`## <author>`. Tool dọn CHỈ 2 loại chắc chắn an toàn: xoá block MỤC LỤC + hạ heading title/author **khi body rỗng thật** (heading trùng title NHƯNG có prose sau = chương thật, vd tuyển tập đặt tên theo 1 truyện — không đụng). Backup `.bak` cạnh book.md.
+
+### Lưu ý về cost
+
+**Chi thực của một cuốn = tổng sổ `work/cost.json`** — pipeline tự ghi 1 entry mỗi lần tiêu tiền (pre-pass, mỗi pass OCR); `all` in "Chi phí cộng dồn cuốn này" cuối build. Đừng diễn giải dòng `cost~$` trong log: mỗi pass in cost riêng cho trang pass đó xử lý, **dòng cuối KHÔNG phải tổng** (thực đo một nhóm: lệch ~10%). Trang cache = $0 khi resume.
 
 ## OCR Pipeline — Limits đã biết
 

@@ -452,6 +452,8 @@ scan2ebook ocr ~/Books-inbox/namphong-q01 ~/output/ocr --json-lines > events.ndj
 | `scan2ebook post <ocr-dir> <book.md> --title "..."` | Stage 2: merge → book.md |
 | `scan2ebook epub <book.md> <book.epub>` | Stage 3: build epub (cover từ auto-detect hoặc cover.jpg) |
 | `scan2ebook epub <book.md> <book.epub> --cover <path>` | Override cover (one-off, không lưu vào context) |
+| `scan2ebook verify <path>...` | Kiểm tra EPUB: OK/TINY/BADZIP/MISSING; nhận .epub, book-home, hoặc thư mục nhiều book-home; rc 0 khi tất cả OK |
+| `scan2ebook verify <dir> --json` | Kết quả verify dạng JSON |
 | `scan2ebook upload <book.epub>` | Stage 4: rclone → Drive |
 | `scan2ebook upload <book.epub> --rename "..."` | Rename khi upload |
 | `scan2ebook all <slug>` | 3 stage chain (slug-or-path) |

@@ -238,23 +238,21 @@ SCAN2EBOOK_HOME=<BATCH_ROOT>/books scan2ebook all <slug> --yes
 
 Nếu vẫn cần build 2 stage tay (pipeline cũ), nhớ: **KHÔNG truyền `--pattern "*.md"` vào `post` trên ổ exFAT** — nó nhặt cả sidecar `._page_*.md` → UnicodeDecodeError (byte 0xb0). Default `page_*.md` tự loại `._`.
 
-**Validate bằng python `zipfile.testzip()`, KHÔNG bằng vòng lặp shell `unzip -t`** (bash mis-split CSV có dấu phẩy trong field; zsh `if cmd >/dev/null` nuốt exit code, âm thầm skip):
+**Validate bằng `scan2ebook verify`** (zipfile.testzip bên dưới — KHÔNG dùng vòng lặp shell `unzip -t`: bash mis-split CSV có dấu phẩy trong field, zsh `if cmd >/dev/null` nuốt exit code, âm thầm skip):
 
-```python
-import csv, zipfile, pathlib
-for r in csv.DictReader(open("group<N>-slugs.csv")):
-    p = pathlib.Path("books")/r["slug"]/"dist"/f"{r['slug']}.epub"
-    ok = p.exists() and p.stat().st_size > 10_240 and zipfile.ZipFile(p).testzip() is None
-    # đếm OK / TINY(<10KB) / BADZIP / MISSING
+```bash
+scan2ebook verify <BATCH_ROOT>/books        # cả thư mục book-homes
+scan2ebook verify books/<slug>              # 1 cuốn
+# per-file: OK/TINY/BADZIP/MISSING + summary; rc 0 chỉ khi tất cả OK
 ```
 
 ### Bước 3 — Dọn TOC rác + rebuild cuốn bị đổi
 
 OCR biến trang "MỤC LỤC" của sách thành heading (pandoc tự sinh TOC → trùng) + chữ trên bìa thành `## <title>`/`## <author>`. Dọn an toàn: xoá block MỤC LỤC + hạ heading title/author **chỉ khi body rỗng** (heading trùng title NHƯNG có prose sau = chương thật, vd tuyển tập đặt tên theo 1 truyện — đừng xoá). Backup `.bak`, rebuild CHỈ các cuốn bị đổi ($0). Script tham số hoá: `tools/fix_toc_junk.py`.
 
-### Lưu ý về cost log
+### Lưu ý về cost
 
-Mỗi pass (`all` lần 1, retry, `all` lần 2) in dòng `cost~$` riêng cho các trang pass đó xử lý — **dòng cuối KHÔNG phải tổng**. Chi thực = tổng mọi dòng cost mọi pass (thực đo một nhóm: lệch ~10%). Trang cache = $0 khi resume.
+**Chi thực của một cuốn = tổng sổ `work/cost.json`** — pipeline tự ghi 1 entry mỗi lần tiêu tiền (pre-pass, mỗi pass OCR); `all` in "Chi phí cộng dồn cuốn này" cuối build. Đừng diễn giải dòng `cost~$` trong log: mỗi pass in cost riêng cho trang pass đó xử lý, **dòng cuối KHÔNG phải tổng** (thực đo một nhóm: lệch ~10%). Trang cache = $0 khi resume.
 
 ## OCR Pipeline — Limits đã biết
 

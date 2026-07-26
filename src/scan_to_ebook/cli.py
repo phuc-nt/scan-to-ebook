@@ -30,10 +30,12 @@ from pathlib import Path
 
 from . import (
     context_prepass,
+    cost_ledger,
     doctor,
     drive_download,
     drive_upload,
     epub_build,
+    epub_verify,
     json_output,
     manga_pipeline,
     ocr,
@@ -247,6 +249,11 @@ def cmd_ocr(args: argparse.Namespace) -> int:
         prompt_context=prompt_context,
         lang=args.lang,
     )
+    # Sổ cost cộng dồn: chỉ khi layout chuẩn (output = <book>/work/ocr) để `ocr`
+    # trần với output tuỳ ý không rải cost.json lung tung. Pass retry của batch
+    # driver đi đúng layout này → chi phí retry vào sổ, tổng sổ = chi thực.
+    if output_dir.name == "ocr":
+        cost_ledger.append_entry(output_dir.parent, "ocr", summary)
     rc = 0 if summary["fail"] == 0 else 1
     if mode == "json":
         status = "ok" if summary["fail"] == 0 else "partial"
@@ -258,6 +265,28 @@ def cmd_ocr(args: argparse.Namespace) -> int:
             )
         )
     return rc
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Kiểm tra cấu trúc EPUB: OK/TINY/BADZIP/MISSING per path. rc 0 khi tất cả OK."""
+    results = epub_verify.verify_paths(args.paths)
+    counts = epub_verify.summarize(results)
+    if args.json:
+        print(json.dumps({
+            "status": "ok" if counts["OK"] == counts["total"] else "partial",
+            "counts": counts,
+            "results": [
+                {"label": r.label, "path": str(r.path), "status": r.status, "size": r.size}
+                for r in results
+            ],
+        }, ensure_ascii=False))
+    else:
+        for r in results:
+            size_note = f" ({r.size // 1024}KB)" if r.status in ("OK", "TINY") else ""
+            print(f"{r.status:8} {r.label}{size_note}")
+        print(f"\nOK={counts['OK']} TINY={counts['TINY']} BADZIP={counts['BADZIP']} "
+              f"MISSING={counts['MISSING']} / {counts['total']}")
+    return 0 if counts["OK"] == counts["total"] and counts["total"] > 0 else 1
 
 
 def cmd_post(args: argparse.Namespace) -> int:
@@ -500,6 +529,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_ocr.add_argument("--dry-run", action="store_true", help="đếm page + ước lượng chi phí, không gọi API")
     _add_json_flags(p_ocr)
     p_ocr.set_defaults(func=cmd_ocr)
+
+    # verify
+    p_verify = sub.add_parser("verify", help="Kiểm tra cấu trúc EPUB (zip integrity): epub / book-home / thư mục nhiều book-home")
+    p_verify.add_argument("paths", type=Path, nargs="+", help="file .epub | book-home | thư mục chứa nhiều book-home")
+    p_verify.add_argument("--json", action="store_true", help="in 1 JSON object thay vì bảng người đọc")
+    p_verify.set_defaults(func=cmd_verify)
 
     # post
     p_post = sub.add_parser("post", help="Stage 2: merge per-page md → book.md")

@@ -21,7 +21,7 @@ import unicodedata
 from pathlib import Path
 from typing import NamedTuple
 
-from . import context_prepass, drive_upload, epub_build, image_ops, json_output, ocr, pdf_render, post_process
+from . import context_prepass, cost_ledger, drive_upload, epub_build, image_ops, json_output, ocr, pdf_render, post_process
 
 # Giá ước lượng qwen3.7-plus ~$0.004/page (đo benchmark 2026-06-08, 1 ảnh A4).
 # CHỈ là fallback trước smoke; sau smoke, per_page token-based đo thật sẽ override.
@@ -497,6 +497,10 @@ def run_full_pipeline(
         "ok": summary["ok"], "blank": summary["blank"], "fail": summary["fail"],
         "skipped": summary["skipped"], "total": summary["total"],
     }
+    # Sổ cost cộng dồn work/cost.json: mỗi pass tiêu tiền = 1 entry (entry <= 0 tự bỏ).
+    # Tổng sổ = chi thực của cuốn qua MỌI pass — hết cảnh grep dòng cost~$ cuối mỗi log.
+    cost_ledger.append_entry(bp.work_dir, "prepass", {"cost_usd": prepass_cost})
+    cost_ledger.append_entry(bp.work_dir, "ocr", summary)
     # prepass_cost: full thường = cache hit (0). carried_cost: prepass đã tiêu ở smoke.
     total_prepass_cost = prepass_cost + carried_cost
     cost = (collector.cost_usd() if collector else summary["cost_usd"]) + total_prepass_cost
@@ -519,6 +523,9 @@ def run_full_pipeline(
     print(f"Merged: {stats['pages_merged']} pages, {stats['chars']} chars, h1={stats['h1']} h2={stats['h2']} footnotes={stats['footnotes']}", file=human_out)
     size_kb = built["epub_result"]["size_bytes"] // 1024
     print(f"✓ {built['book_epub']} ({size_kb}KB)", file=human_out)
+    ledger_total = cost_ledger.total(bp.work_dir)
+    if ledger_total > 0:
+        print(f"Chi phí cộng dồn cuốn này (work/cost.json): ${ledger_total:.4f}", file=human_out)
     paths["book_md"] = str(built["book_md"].resolve())
     paths["epub_path"] = str(built["book_epub"].resolve())
 

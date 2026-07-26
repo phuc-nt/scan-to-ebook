@@ -370,6 +370,71 @@ def test_run_batch_non_deterministic_fail_leaves_page_blank(monkeypatch, tmp_pat
     assert [p.stem for p in todo] == ["page_1"]
 
 
+# ------------------------------------ B4: waste-token accounting (sổ cost khớp chi thực)
+
+def _usage_exc(msg: str, tin: int, tout: int) -> RuntimeError:
+    e = RuntimeError(msg)
+    e.usage = {"prompt_tokens": tin, "completion_tokens": tout}
+    return e
+
+
+def test_ocr_page_retry_success_carries_waste_tokens(monkeypatch, tmp_path: Path):
+    """Attempt fail (empty content, ĐÃ bill input tokens) rồi thành công → meta mang
+    waste_tokens_* để run_batch cộng đủ cost.
+
+    B4 review 2026-07-26: trước fix chỉ usage lần thành công được ghi sổ — token
+    của attempt fail biến mất → sổ cost under-count hệ thống."""
+    img = tmp_path / "page_1.png"
+    img.write_bytes(b"\x89PNG\r\n")
+    monkeypatch.setattr(ocr.time, "sleep", lambda *_: None)
+
+    calls = {"n": 0}
+
+    def fake_post_once(*_a, **_k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _usage_exc("empty content (finish_reason=error)", 1000, 5)
+        return "nội dung", {"latency_s": 1.0, "usage": {"prompt_tokens": 1100, "completion_tokens": 900}}
+
+    monkeypatch.setattr(ocr, "_post_once", fake_post_once)
+    text, meta = ocr.ocr_page("k", "m", img, retries=4)
+    assert text == "nội dung"
+    assert meta["waste_tokens_in"] == 1000 and meta["waste_tokens_out"] == 5
+
+
+def test_run_batch_counts_tokens_of_blank_and_dead_pages(monkeypatch, tmp_path: Path):
+    """Blank page + dead page đều đã bill input tokens → summary tokens/cost phải tính.
+
+    Trang blank: 1 call phát hiện blank vẫn tốn ~nghìn input tokens (ảnh full-res).
+    Trang dead (2 attempt empty): tốn gấp đôi. Trước fix cả hai ghi tokens=0."""
+    inbox = tmp_path / "scans"
+    inbox.mkdir()
+    out = tmp_path / "out"
+    (inbox / "page_1.png").write_bytes(b"\x89PNG\r\n")  # sẽ blank
+    (inbox / "page_2.png").write_bytes(b"\x89PNG\r\n")  # sẽ dead (2 lần empty)
+    monkeypatch.setattr(ocr.time, "sleep", lambda *_: None)
+
+    # Mock ở tầng ocr_page: exception thoát ra mang waste_usage (ocr_page thật gắn
+    # attr này từ usage các attempt — xem test retry_success ở trên cho tầng dưới).
+    def fake_ocr_page(_key, _model, page_path, **_k):
+        if page_path.name == "page_1.png":
+            exc = RuntimeError(ocr._BLANK_MARKER)
+            exc.waste_usage = (800, 0)  # 1 call phát hiện blank, đã bill 800 in
+            raise exc
+        raise ocr._dead("empty content (finish_reason=error)", 2000, 10)  # 2 attempt
+
+    monkeypatch.setattr(ocr, "ocr_page", fake_ocr_page)
+    summary = ocr.run_batch(
+        api_key="k", input_dir=inbox, output_dir=out,
+        model="m", workers=1, pattern="*.png",
+    )
+    assert summary["blank"] == 1 and summary["fail"] == 1
+    # 800 (blank) + 2000 (dead) input tokens phải vào summary → cost > 0.
+    assert summary["tokens_in"] == 2800, summary
+    assert summary["tokens_out"] == 10, summary
+    assert summary["cost_usd"] > 0
+
+
 def test_run_batch_402_circuit_breaker_skips_remaining_pages(monkeypatch, tmp_path: Path):
     """402 ở 1 trang → các trang CHƯA gọi API bị bỏ qua tại chỗ (không bắn call chết).
 

@@ -261,9 +261,10 @@ def _post_once(
         raise RuntimeError(f"malformed response (JSON parse): {exc} | body[:200]={raw[:200]!r}") from exc
     latency = time.time() - t0
 
+    usage = body.get("usage", {})
     if "choices" not in body or not body["choices"]:
         err = body.get("error", body)
-        raise RuntimeError(f"no choices in response: {json.dumps(err)[:300]}")
+        raise _usage_err(f"no choices in response: {json.dumps(err)[:300]}", usage)
 
     msg = body["choices"][0].get("message", {})
     text = msg.get("content")
@@ -271,12 +272,31 @@ def _post_once(
         finish = body["choices"][0].get("finish_reason", "unknown")
         # finish_reason=stop + rỗng = trang trống thật (model xem xong, không có gì).
         # Phân biệt với rỗng do lỗi/cắt (finish khác) → cái sau vẫn transient retry.
+        # Cả hai đều ĐÃ BILL input tokens (ảnh full-res) — gắn usage vào exception
+        # để ocr_page cộng vào waste accounting (review 2026-07-26 B4).
         if finish == "stop":
-            raise RuntimeError(_BLANK_MARKER)
-        raise RuntimeError(f"empty content (finish_reason={finish})")
+            raise _usage_err(_BLANK_MARKER, usage)
+        raise _usage_err(f"empty content (finish_reason={finish})", usage)
 
-    usage = body.get("usage", {})
     return text, {"latency_s": round(latency, 2), "usage": usage}
+
+
+def _dead(msg: str, waste_in: int, waste_out: int) -> "DeadPageError":
+    """DeadPageError kèm waste_usage (tổng token đã bill của trang) — xem _usage_err."""
+    exc = DeadPageError(msg)
+    exc.waste_usage = (waste_in, waste_out)
+    return exc
+
+
+def _usage_err(msg: str, usage: dict) -> RuntimeError:
+    """RuntimeError kèm `usage` (token ĐÃ BILL của attempt này).
+
+    Attempt trả body hợp lệ nhưng bị coi là lỗi (empty content / blank / no choices)
+    vẫn tiêu input tokens thật (ảnh full-res ~nghìn token). Không gắn usage thì
+    ocr_page/run_batch mất dấu → sổ cost under-count hệ thống (B4)."""
+    exc = RuntimeError(msg)
+    exc.usage = usage
+    return exc
 
 
 def _error_class(msg: str) -> str:
@@ -352,19 +372,32 @@ def ocr_page(
     last_exc: Exception | None = None
     prev_class: str | None = None
     same_class_count = 0
+    # Token ĐÃ BILL bởi các attempt fail trước đó (empty content/blank có body hợp lệ
+    # kèm usage). Cộng dồn để: (a) thành công sau retry → meta mang waste_tokens_* cho
+    # run_batch tính đủ cost; (b) fail hẳn → gắn waste_usage vào exception (B4).
+    waste_in = waste_out = 0
     for attempt in range(retries + 1):
         try:
-            return _post_once(api_key, model, image_b64, mime, max_tokens, prompt_context, lang)
+            text, meta = _post_once(api_key, model, image_b64, mime, max_tokens, prompt_context, lang)
+            meta["waste_tokens_in"] = waste_in
+            meta["waste_tokens_out"] = waste_out
+            return text, meta
         except RuntimeError as exc:
             last_exc = exc
             msg = str(exc)
+            u = getattr(exc, "usage", None) or {}
+            waste_in += int(u.get("prompt_tokens") or 0)
+            waste_out += int(u.get("completion_tokens") or 0)
+            # Mọi exception thoát ra ngoài đều mang tổng token đã bill của TRANG này
+            # (kể cả attempt hiện tại) để run_batch cộng vào summary/sổ cost.
+            exc.waste_usage = (waste_in, waste_out)
             # HTTP 400 content-deterministic (moderation chặn ảnh / định dạng ảnh):
             # retry cùng ảnh không bao giờ khác → DeadPageError NGAY lần đầu để
             # run_batch ghi placeholder (sách vẫn build, trang tính fail). 401/402/403
             # và 400 khác vẫn raise thường (trang trống cho pass sau) — xem docstring
             # DeadPageError.
             if _is_dead_400(msg):
-                raise DeadPageError(msg) from exc
+                raise _dead(msg, waste_in, waste_out) from exc
             if not _is_transient(msg) or attempt == retries:
                 raise
             # Early-abort: CHỈ lỗi content-class (empty/malformed) được đếm — cùng lớp
@@ -377,7 +410,7 @@ def ocr_page(
                 same_class_count = same_class_count + 1 if cls == prev_class else 1
                 prev_class = cls
                 if same_class_count >= _DETERMINISTIC_ABORT_AFTER:
-                    raise DeadPageError(msg) from exc
+                    raise _dead(msg, waste_in, waste_out) from exc
             else:
                 # Lỗi hạ tầng xen giữa: reset streak — không để 1 lần empty trước đó
                 # + 1 lần empty sau chuỗi 429 bị ghép thành "2 lần liên tiếp".
@@ -514,16 +547,20 @@ def run_batch(
                 prompt_context=prompt_context, lang=lang,
             )
             usage = meta.get("usage", {})
+            # Token = lần thành công + waste các attempt fail trước đó (đều đã bill).
             return PageResult(
                 page_path=page_path,
                 markdown=md,
                 latency_s=meta["latency_s"],
-                prompt_tokens=usage.get("prompt_tokens", 0),
-                completion_tokens=usage.get("completion_tokens", 0),
+                prompt_tokens=usage.get("prompt_tokens", 0) + meta.get("waste_tokens_in", 0),
+                completion_tokens=usage.get("completion_tokens", 0) + meta.get("waste_tokens_out", 0),
                 error=None,
             )
         except Exception as exc:
             msg = str(exc)
+            # Token đã bill của các attempt trang này (ocr_page gắn vào exception) —
+            # cộng vào summary dù trang fail/blank, sổ cost mới khớp chi thực (B4).
+            w_in, w_out = getattr(exc, "waste_usage", None) or (0, 0)
             if "HTTP 402" in msg:
                 credit_dead.set()  # trang sau bỏ qua tại chỗ, không bắn call chết
             if _BLANK_MARKER in msg:
@@ -532,8 +569,8 @@ def run_batch(
                     page_path=page_path,
                     markdown=BLANK_PLACEHOLDER,
                     latency_s=0,
-                    prompt_tokens=0,
-                    completion_tokens=0,
+                    prompt_tokens=w_in,
+                    completion_tokens=w_out,
                     error=None,
                     is_blank=True,
                 )
@@ -548,8 +585,8 @@ def run_batch(
                     page_path=page_path,
                     markdown=DEAD_PLACEHOLDER.format(reason=reason),
                     latency_s=0,
-                    prompt_tokens=0,
-                    completion_tokens=0,
+                    prompt_tokens=w_in,
+                    completion_tokens=w_out,
                     error=msg,
                     is_dead=True,
                 )
@@ -561,8 +598,8 @@ def run_batch(
                 page_path=page_path,
                 markdown=None,
                 latency_s=0,
-                prompt_tokens=0,
-                completion_tokens=0,
+                prompt_tokens=w_in,
+                completion_tokens=w_out,
                 error=msg,
             )
 
@@ -570,6 +607,10 @@ def run_batch(
         futures = [pool.submit(work, p) for p in todo]
         for fut in as_completed(futures):
             r = fut.result()
+            # Token cộng cho MỌI kết quả (ok/blank/dead/fail) — attempt fail cũng đã
+            # bill input tokens thật; chỉ cộng ok là sổ cost under-count (B4).
+            total_in += r.prompt_tokens
+            total_out += r.completion_tokens
             if r.error:
                 fail_count += 1
                 failures.append((r.page_path.name, r.error))
@@ -588,8 +629,6 @@ def run_batch(
                 if on_event:
                     on_event("page_blank", {"page": r.page_path.name, "dst": dst.name})
                 continue
-            total_in += r.prompt_tokens
-            total_out += r.completion_tokens
             ok_count += 1
             if on_event:
                 on_event(

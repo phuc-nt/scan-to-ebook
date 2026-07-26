@@ -464,14 +464,29 @@ def run_full_pipeline(
     smoke. Full prepass = cache hit (cost 0) nên phải fold carried_cost vào tổng để
     summary không under-count spend."""
     on_event, collector, _ = _make_ocr_emitter(mode)
-    prepass = _run_prepass_or_abort(
-        api_key=api_key, model=args.model, scans_dir=bp.scans_dir, work_dir=bp.work_dir,
-        max_tokens=context_prepass.CONTEXT_MAX_TOKENS, on_event=on_event,
-        meta=meta, slug=bp.book_home.name,
-    )
-    if prepass is None:
-        return _prepass_fail_summary(mode, "all", bp.ocr_dir)
-    block, prepass_cost = prepass
+    # Pre-pass chỉ phục vụ OCR. Đếm todo TRƯỚC: 0 trang cần OCR (rebuild từ md cache)
+    # → bỏ qua pre-pass hẳn — không tốn cost, không dính moderation (batch 3: sách
+    # ảnh chiến tranh bị provider chặn ảnh mẫu `data_inspection_failed` làm abort
+    # cả build dù md đã đủ). --skip-prepass: ép bỏ qua khi vẫn còn trang (operator
+    # chấp nhận OCR phần còn lại bằng base prompt + cache context nếu có).
+    todo, _ = ocr.collect_pending_pages(bp.scans_dir, IMAGE_PATTERNS, bp.ocr_dir, None)
+    skip_prepass = getattr(args, "skip_prepass", False)
+    if not todo or skip_prepass:
+        ctx = context_prepass.load_context(bp.work_dir)
+        block = context_prepass.render_block(ctx) if ctx else ""
+        prepass_cost = 0.0
+        reason = "0 trang cần OCR" if not todo else "--skip-prepass"
+        cache_note = "dùng cache context.json" if ctx else "không có cache context"
+        print(f"==> bỏ qua context pre-pass ({reason}; {cache_note})", file=human_out)
+    else:
+        prepass = _run_prepass_or_abort(
+            api_key=api_key, model=args.model, scans_dir=bp.scans_dir, work_dir=bp.work_dir,
+            max_tokens=context_prepass.CONTEXT_MAX_TOKENS, on_event=on_event,
+            meta=meta, slug=bp.book_home.name,
+        )
+        if prepass is None:
+            return _prepass_fail_summary(mode, "all", bp.ocr_dir)
+        block, prepass_cost = prepass
     summary = ocr.run_batch(
         api_key=api_key, input_dir=bp.scans_dir, output_dir=bp.ocr_dir,
         model=args.model, workers=args.workers, pattern=IMAGE_PATTERNS,

@@ -234,14 +234,9 @@ Cuốn báo `WARN` (thay vì `DONE`) là cuốn `all` không ra được EPUB �
 SCAN2EBOOK_HOME=<BATCH_ROOT>/books scan2ebook all <slug> --yes
 ```
 
-**Moderation-block (sách chiến tranh, ảnh nhạy cảm):** provider từ chối ảnh SAMPLE ở context pre-pass (`data_inspection_failed` HTTP 400) → `all` abort trước merge dù mọi trang đã OCR xong qua `ocr` retry pass. Build 2 stage riêng (bỏ qua pre-pass, $0):
+**Moderation-block (sách chiến tranh, ảnh nhạy cảm):** provider từ chối ảnh SAMPLE ở context pre-pass (`data_inspection_failed` HTTP 400). Pipeline tự xử lý: khi **0 trang cần OCR** (rebuild từ md cache), `all` bỏ qua pre-pass hẳn → rebuild sách moderation-block chỉ là `all <slug> --yes`. Nếu sách còn trang dở dang mà pre-pass vẫn bị chặn: `all <slug> --yes --skip-prepass` (trang còn lại OCR bằng base prompt + cache context nếu có).
 
-```bash
-scan2ebook post books/<slug>/work/ocr books/<slug>/work/book.md --title "..." --author "..."
-scan2ebook epub books/<slug>/work/book.md books/<slug>/dist/<slug>.epub
-```
-
-**KHÔNG truyền `--pattern "*.md"` vào `post` trên ổ exFAT** — nó nhặt cả sidecar `._page_*.md` → UnicodeDecodeError (byte 0xb0). Default `page_*.md` tự loại `._`.
+Nếu vẫn cần build 2 stage tay (pipeline cũ), nhớ: **KHÔNG truyền `--pattern "*.md"` vào `post` trên ổ exFAT** — nó nhặt cả sidecar `._page_*.md` → UnicodeDecodeError (byte 0xb0). Default `page_*.md` tự loại `._`.
 
 **Validate bằng python `zipfile.testzip()`, KHÔNG bằng vòng lặp shell `unzip -t`** (bash mis-split CSV có dấu phẩy trong field; zsh `if cmd >/dev/null` nuốt exit code, âm thầm skip):
 

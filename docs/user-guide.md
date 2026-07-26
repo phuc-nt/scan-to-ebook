@@ -447,6 +447,8 @@ scan2ebook ocr ~/Books-inbox/namphong-q01 ~/output/ocr --json-lines > events.ndj
 | `scan2ebook ocr <slug-or-path> <out> --max-tokens 16000` | Tăng trần output cho trang text rất dày |
 | `scan2ebook ocr <slug-or-path> <out> --model <id>` | Đổi vision model (hoặc đặt env `OCR_MODEL`) |
 | `scan2ebook ocr <slug-or-path> <out> --json` | JSON summary output |
+| `scan2ebook ocr <slug-or-path> <out> --no-context` | OCR bằng base prompt (bỏ context block cache) |
+| `scan2ebook ocr <slug-or-path> <out> --context <file>` | Dùng file text làm context block (override cache) |
 | `scan2ebook post <ocr-dir> <book.md> --title "..."` | Stage 2: merge → book.md |
 | `scan2ebook epub <book.md> <book.epub>` | Stage 3: build epub (cover từ auto-detect hoặc cover.jpg) |
 | `scan2ebook epub <book.md> <book.epub> --cover <path>` | Override cover (one-off, không lưu vào context) |
@@ -457,5 +459,6 @@ scan2ebook ocr ~/Books-inbox/namphong-q01 ~/output/ocr --json-lines > events.ndj
 | `scan2ebook all <slug> --smoke` | Cost gate: OCR 10 trang + mini epub + confirm |
 | `scan2ebook all <slug> --smoke --yes` | Cost gate + bypass prompt (agent mode) |
 | `scan2ebook all <slug> --home <path>` | Custom data root |
+| `scan2ebook all <slug> --skip-prepass` | Bỏ pre-pass (sách bị moderation chặn ảnh mẫu); rebuild 0-todo tự bỏ pre-pass, không cần flag |
 | `scan2ebook all <slug> --json` | JSON summary output |
 | `scan2ebook all <slug> --json-lines` | NDJSON stream output (progress + summary) |

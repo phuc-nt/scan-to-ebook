@@ -29,6 +29,7 @@ import sys
 from pathlib import Path
 
 from . import (
+    context_prepass,
     doctor,
     drive_download,
     drive_upload,
@@ -189,6 +190,33 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _resolve_ocr_context(args: argparse.Namespace, output_dir: Path, out) -> str:
+    """Chọn context block cho `ocr` trần: --context file > cache cạnh output > "".
+
+    Bug batch 3: pass retry của driver gọi `ocr` trần → mọi trang retry mất context
+    block (chính tả cổ, chế độ thơ, tên riêng) dù work/context.json nằm ngay cạnh
+    (layout chuẩn work/ocr → sibling work/context.json). Auto-load để chất lượng
+    đồng nhất giữa các pass. context.json là source-of-truth (context.md chỉ là
+    mirror) nên re-derive block qua render_block, giống all-flow."""
+    if args.no_context:
+        return ""
+    if args.context is not None:
+        ctx_file = args.context.expanduser()
+        try:
+            block = ctx_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"!! không đọc được --context {ctx_file}: {exc}", file=sys.stderr)
+            return ""
+        print(f"==> context: {ctx_file} ({len(block)} chars)", file=out)
+        return block
+    ctx = context_prepass.load_context(output_dir.parent)
+    if ctx is None:
+        return ""
+    block = context_prepass.render_block(ctx)
+    print(f"==> context: {output_dir.parent / 'context.json'} (cache, {len(block)} chars)", file=out)
+    return block
+
+
 def cmd_ocr(args: argparse.Namespace) -> int:
     input_dir = args.input.expanduser()
     output_dir = args.output.expanduser()
@@ -199,6 +227,7 @@ def cmd_ocr(args: argparse.Namespace) -> int:
     # F3: in đường dẫn output tuyệt đối ngay đầu run (stderr ở json mode).
     out = sys.stderr if mode != "human" else sys.stdout
     print(f"==> output: {output_dir.resolve()}", file=out)
+    prompt_context = _resolve_ocr_context(args, output_dir, out)
 
     api_key = pipeline._require_api_key_or_json(mode, stage="ocr")
     if api_key is None:
@@ -215,6 +244,7 @@ def cmd_ocr(args: argparse.Namespace) -> int:
         limit=args.limit,
         max_tokens=args.max_tokens,
         on_event=on_event,
+        prompt_context=prompt_context,
         lang=args.lang,
     )
     rc = 0 if summary["fail"] == 0 else 1
@@ -465,6 +495,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ocr.add_argument("--limit", type=int, default=None, help="OCR tối đa N page đầu (smoke test)")
     p_ocr.add_argument("--max-tokens", type=int, default=12000, help="max output tokens / page")
     p_ocr.add_argument("--lang", default="vi", help="ngôn ngữ sách → chọn prompt OCR (vi mặc định | ja cho sách Nhật dọc RTL)")
+    p_ocr.add_argument("--context", type=Path, default=None, help="file text làm context block (override auto-load từ <output>/../context.json)")
+    p_ocr.add_argument("--no-context", dest="no_context", action="store_true", help="OCR bằng base prompt, bỏ qua context block cache")
     p_ocr.add_argument("--dry-run", action="store_true", help="đếm page + ước lượng chi phí, không gọi API")
     _add_json_flags(p_ocr)
     p_ocr.set_defaults(func=cmd_ocr)
@@ -504,6 +536,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--workers", type=int, default=12)
     p_all.add_argument("--max-tokens", type=int, default=12000, help="max output tokens / page")
     p_all.add_argument("--dry-run", action="store_true", help="đếm page + ước lượng chi phí, không gọi API")
+    p_all.add_argument("--skip-prepass", dest="skip_prepass", action="store_true", help="bỏ qua context pre-pass (sách bị moderation chặn ảnh mẫu; trang còn lại OCR bằng base prompt + cache context nếu có)")
     p_all.add_argument("--smoke", action="store_true", help="OCR ≤10 trang + mini epub + ước cost full rồi STOP (gate xác nhận)")
     p_all.add_argument("--yes", "-y", action="store_true", help="bỏ qua prompt smoke gate, chạy full luôn (agent/CI)")
     p_all.add_argument("--upload", action="store_true", help="upload epub lên Drive sau khi build")

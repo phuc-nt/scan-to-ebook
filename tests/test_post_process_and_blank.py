@@ -143,3 +143,123 @@ def test_upgrade_chapter_heading_promotes_to_h1():
     text = "Hồi thứ nhất\n\nNội dung mở đầu."
     out = post_process.upgrade_chapter_headings(text)
     assert out.startswith("# Hồi thứ nhất")
+
+
+def test_atx_heading_missing_space_normalized():
+    """`##幽霊の家` (model CJH bỏ space ASCII) → `## 幽霊の家` để pandoc nhận heading.
+
+    CommonMark bắt buộc space sau #; thiếu thì render thành text, mất split point + TOC.
+    Gặp thật ở OCR sách Nhật (デッドエンドの思い出 page_004)."""
+    assert post_process._normalize_atx_heading("##幽霊の家") == "## 幽霊の家"
+    assert post_process._normalize_atx_heading("#見出し") == "# 見出し"
+    assert post_process._normalize_atx_heading("##### x") == "##### x"  # đã có space → nguyên
+    assert post_process._normalize_atx_heading("普通の文。") == "普通の文。"  # văn xuôi không đụng
+
+
+def test_upgrade_keeps_cjk_h2_heading_with_normalized_space():
+    # h2 không phải keyword chương VN → giữ h2 nhưng đã chuẩn-hoá space (không rớt về line gốc).
+    out = post_process.upgrade_chapter_headings("##幽霊の家\n\n本文。")
+    assert "## 幽霊の家" in out
+    assert "##幽霊の家" not in out
+
+
+# ------------------------------------------ thematic break `---` → `* * *` (YAML)
+
+def test_dash_thematic_break_becomes_asterisks():
+    """Dòng `---`/`----`/`- - -` giữa body → `* * *` (pandoc không nhầm khối YAML).
+
+    Bug thật (batch3, khai-hung-than-the-va-tac-pham + 4 cuốn nữa): OCR bản scan cổ
+    sinh dòng gạch ngang phân cách; pandoc coi `---…---` sau dòng trống là khối YAML
+    metadata, gặp `: ` bên trong → rc=64 'mapping values are not allowed'."""
+    for s in ["---", "----", "-----", "- - -", " --- "]:
+        assert post_process._normalize_thematic_breaks(s) == "* * *", f"phải đổi: {s!r}"
+
+
+def test_dash_thematic_break_preserves_prose_and_asterisks():
+    """Không đụng: văn xuôi, heading, `***`/`___`, hyphen trong từ ghép."""
+    for s in ["văn-chương", "-- chưa đủ 3", "## Chương 1", "***", "___",
+              "một - hai - ba bốn"]:
+        assert post_process._normalize_thematic_breaks(s) == s, f"giữ nguyên: {s!r}"
+
+
+def test_dash_thematic_break_skips_code_fence():
+    """`---` trong fenced code block là literal — không đổi."""
+    t = "Đoạn văn.\n\n---\n\n```\n---\n```\n"
+    out = post_process._normalize_thematic_breaks(t)
+    assert "* * *" in out                    # ngoài fence: đổi
+    assert out.count("---") == 1             # trong fence: giữ đúng 1 dòng ---
+
+
+def test_merge_pages_dash_separator_does_not_break_pandoc(tmp_path: Path):
+    """End-to-end: 2 page có `---` + dòng chứa `: ` → pandoc build được EPUB (không rc=64)."""
+    import shutil
+    import subprocess
+    ocr_dir = tmp_path / "ocr"
+    ocr_dir.mkdir()
+    (ocr_dir / "page_1.md").write_text("Đoạn một.\n", encoding="utf-8")
+    # page 2: separator dấu gạch rồi dòng có ':' — đúng dạng vỡ YAML khi để nguyên
+    (ocr_dir / "page_2.md").write_text(
+        "---\n\nSaigon 1968: trang 3, 4, 67.\n\nĐoạn hai.\n", encoding="utf-8")
+    out = tmp_path / "book.md"
+    post_process.merge_pages(input_dir=ocr_dir, output_path=out, title="T", lang="vi")
+    full = out.read_text(encoding="utf-8")
+    # tách phần body (sau khối front matter `---\n...\n---\n`) để soát riêng.
+    body = full.split("---\n", 2)[-1]
+    assert "* * *" in body                       # separator đã đổi
+    assert "\n---\n" not in body and not body.lstrip().startswith("---")  # sạch `---`
+    if shutil.which("pandoc"):
+        epub = tmp_path / "book.epub"
+        r = subprocess.run(["pandoc", str(out), "-o", str(epub)],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, f"pandoc vỡ: {r.stderr}"
+        assert epub.exists()
+
+
+# --------------------------------------------------- YAML front matter escaping
+
+def _quoted_value(fm: str, key: str) -> str:
+    """Lấy value của 1 key trong front matter, bỏ double-quote + un-escape."""
+    import re
+    m = re.search(rf'^{key}: "((?:[^"\\]|\\.)*)"', fm, flags=re.MULTILINE)
+    assert m, f"{key} phải là double-quoted scalar trong:\n{fm}"
+    return m.group(1).replace('\\"', '"').replace("\\\\", "\\")
+
+
+def test_front_matter_title_with_colon_is_quoted():
+    """Title chứa dấu ':' phải được double-quote (không vỡ pandoc YAML).
+
+    Bug thật: sách Vương Hồng Sển 'Ăn Cơm Mới, Nói Chuyện Cũ: Hậu Giang - Ba Thắc'
+    nhét thô vào 'title: ...' → pandoc rc=64 'mapping values are not allowed'. Fix:
+    double-quote scalar. Test không dùng lib yaml (runtime pure-stdlib) — check trực
+    tiếp value nằm trong ngoặc kép và round-trip đúng."""
+    title = "Ăn Cơm Mới, Nói Chuyện Cũ: Hậu Giang - Ba Thắc"
+    fm = post_process.build_front_matter(title, "Vương Hồng Sển", "vi", "1968")
+    assert 'title: "' in fm and " Hậu Giang" in fm
+    assert _quoted_value(fm, "title") == title
+    assert _quoted_value(fm, "author") == "Vương Hồng Sển"
+
+
+def test_front_matter_escapes_quote_and_backslash():
+    """Dấu " và \\ trong title phải escape (không rớt ra ngoài ngoặc = vỡ YAML)."""
+    title = 'Tựa "trong ngoặc" và \\slash'
+    fm = post_process.build_front_matter(title, None, "vi", None)
+    assert _quoted_value(fm, "title") == title
+
+
+def test_front_matter_pandoc_accepts_colon_title(tmp_path: Path):
+    """Chứng minh cuối cùng: pandoc build được EPUB với title có dấu ':' (không rc=64).
+
+    Skip nếu môi trường không có pandoc (CI tối giản)."""
+    import shutil
+    import subprocess
+    if not shutil.which("pandoc"):
+        import pytest
+        pytest.skip("pandoc không có")
+    md = tmp_path / "book.md"
+    md.write_text(
+        post_process.build_front_matter("A: B, C: D", "Tác Giả: X", "vi", "1970")
+        + "\n# Chương 1\n\nNội dung.\n", encoding="utf-8")
+    out = tmp_path / "book.epub"
+    r = subprocess.run(["pandoc", str(md), "-o", str(out)], capture_output=True, text=True)
+    assert r.returncode == 0, f"pandoc vỡ: {r.stderr}"
+    assert out.exists()

@@ -28,7 +28,18 @@ import os
 import sys
 from pathlib import Path
 
-from . import doctor, drive_download, drive_upload, epub_build, json_output, manga_pipeline, ocr, pipeline, post_process
+from . import (
+    doctor,
+    drive_download,
+    drive_upload,
+    epub_build,
+    json_output,
+    manga_pipeline,
+    ocr,
+    pdf_render,
+    pipeline,
+    post_process,
+)
 
 # Re-export pipeline symbols dưới namespace `cli` để giữ tương thích test/cmd handlers
 # (vd test_cli_ux_helpers.py dùng `cli._slugify`/`cli._import_images`/`cli.EST_COST_PER_PAGE`).
@@ -127,7 +138,7 @@ def cmd_init(args: argparse.Namespace) -> int:
                 print(f"--from không phải thư mục ảnh hay file PDF: {src}", file=sys.stderr)
                 return 2
             if is_pdf:
-                n = _import_pdf(src, bp.scans_dir)
+                n = _import_pdf(src, bp.scans_dir, dpi=args.dpi)
                 print(f"Rendered {n} trang PDF → scans/page_NNN.jpg")
             else:
                 n = _import_images(src, bp.scans_dir)
@@ -204,6 +215,7 @@ def cmd_ocr(args: argparse.Namespace) -> int:
         limit=args.limit,
         max_tokens=args.max_tokens,
         on_event=on_event,
+        lang=args.lang,
     )
     rc = 0 if summary["fail"] == 0 else 1
     if mode == "json":
@@ -424,6 +436,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("slug", help="tên sách (folder name), vd namphong-q01")
     p_init.add_argument("--home", type=Path, default=None, help="data-root chứa mọi sách (default $SCAN2EBOOK_HOME hoặc ~/scan2ebook)")
     p_init.add_argument("--from", dest="from_dir", default=None, help="thư mục ảnh, file .pdf, HOẶC link Google Drive file → render/copy vào scans/page_NNN")
+    p_init.add_argument(
+        "--dpi", type=int, default=pdf_render.DEFAULT_DPI,
+        help=(
+            f"DPI render PDF (default {pdf_render.DEFAULT_DPI}). Scan nguồn thấp (vd ảnh nhúng "
+            "1024px) thì 72 cho ra đúng pixel gốc — render cao hơn chỉ phóng to, không thêm "
+            "thông tin mà payload OCR to gấp ~2.6×. Kiểm cỡ ảnh gốc: pdfimages -list <pdf>"
+        ),
+    )
     p_init.add_argument("--title", default=None, help="title cho metadata.json (default = slug)")
     p_init.add_argument("--author", default=None)
     p_init.add_argument("--lang", default="vi")
@@ -444,6 +464,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ocr.add_argument("--pattern", default=IMAGE_PATTERNS, help="glob ảnh, phân tách dấu phẩy (default PNG+JPG)")
     p_ocr.add_argument("--limit", type=int, default=None, help="OCR tối đa N page đầu (smoke test)")
     p_ocr.add_argument("--max-tokens", type=int, default=12000, help="max output tokens / page")
+    p_ocr.add_argument("--lang", default="vi", help="ngôn ngữ sách → chọn prompt OCR (vi mặc định | ja cho sách Nhật dọc RTL)")
     p_ocr.add_argument("--dry-run", action="store_true", help="đếm page + ước lượng chi phí, không gọi API")
     _add_json_flags(p_ocr)
     p_ocr.set_defaults(func=cmd_ocr)

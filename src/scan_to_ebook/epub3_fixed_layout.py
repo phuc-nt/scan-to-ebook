@@ -97,7 +97,10 @@ def filtered_pages(img_dir: Path | str, min_px: int = 400) -> list[tuple[Path, t
     warn tổng). KHÔNG raise khi rỗng (caller quyết định)."""
     img_dir = Path(img_dir)
     imgs = sorted(
-        [p for p in img_dir.iterdir() if p.suffix.lower() in _IMG_EXTS],
+        [
+            p for p in img_dir.iterdir()
+            if p.suffix.lower() in _IMG_EXTS and not ocr._is_sidecar(p)
+        ],
         key=ocr.natural_sort_key,
     )
     pages: list[tuple[Path, tuple[int, int]]] = []
@@ -144,7 +147,10 @@ def build(
     # Thứ tự trang = filtered_pages (nguồn-sự-thật chung với auto-cover detect).
     # Tự đếm/cảnh báo ảnh bị bỏ ở đây để giữ log chi tiết (filtered_pages im lặng).
     imgs = sorted(
-        [p for p in img_dir.iterdir() if p.suffix.lower() in _IMG_EXTS],
+        [
+            p for p in img_dir.iterdir()
+            if p.suffix.lower() in _IMG_EXTS and not ocr._is_sidecar(p)
+        ],
         key=ocr.natural_sort_key,
     )
     dropped_small = 0

@@ -45,7 +45,8 @@ def patched(monkeypatch):
     calls = {"run_batch": [], "build_book": 0}
 
     def fake_run_batch(*, api_key, input_dir, output_dir, model, workers,
-                       pattern, limit=None, max_tokens, on_event=None, prompt_context=""):
+                       pattern, limit=None, max_tokens, on_event=None, prompt_context="",
+                       lang=None):
         calls["run_batch"].append({"limit": limit})
         # giả lập đã OCR `limit` (hoặc tất cả) trang vào output_dir để
         # collect_pending_pages đếm remaining đúng.
@@ -167,7 +168,8 @@ def test_smoke_est_uses_measured_per_page_cost(tmp_path, monkeypatch, capsys):
     inbox = _make_inbox(tmp_path, 20)
 
     def fake_run_batch(*, api_key, input_dir, output_dir, model, workers,
-                       pattern, limit=None, max_tokens, on_event=None, prompt_context=""):
+                       pattern, limit=None, max_tokens, on_event=None, prompt_context="",
+                       lang=None):
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         pages = sorted(Path(input_dir).glob("page_*.png"))
         n = limit if limit is not None else len(pages)

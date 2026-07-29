@@ -265,6 +265,26 @@ SCAN2EBOOK_HOME=<BATCH_ROOT>/books scan2ebook all <slug> --yes
 
 OCR biến trang "MỤC LỤC" của sách thành heading (pandoc tự sinh TOC → trùng) + chữ trên bìa thành `## <title>`/`## <author>`. Tool dọn CHỈ 2 loại chắc chắn an toàn: xoá block MỤC LỤC + hạ heading title/author **khi body rỗng thật** (heading trùng title NHƯNG có prose sau = chương thật, vd tuyển tập đặt tên theo 1 truyện — không đụng). Backup `.bak` cạnh book.md.
 
+### Bước 4 — Audit chất lượng: quét CHÍNH FILE ĐÃ PUBLISH, không tin workdir
+
+Ba bài học trả giá thật, áp dụng cho mọi batch:
+
+- **Workdir sạch ≠ bản publish sạch.** Cứu trang chết (rescue) sửa `work/ocr/*.md` nhưng
+  nếu quên rebuild + copy đè bản publish thì file người đọc nhận vẫn là bản lỗi — và mọi
+  phép đếm (đủ file, zip OK) đều pass. Audit phải mở chính EPUB đã publish, quét text
+  từng `.xhtml`: đếm placeholder `OCR FAILED`, chữ `(blank)` hiển thị, ký tự mojibake
+  `�`, fence ``` sót. **Quy tắc: rescue xong → LUÔN rebuild + republish.**
+- **Chốt mốc = so nội dung, không đếm hàng.** Bộ đếm (số file, số record, tồn tại link)
+  pass được cả khi file trỏ nhầm bản cũ. Verify thật = tải lại file từ nơi phân phối
+  cuối cùng, so sha256 với bản gốc từng byte.
+- **Ổ ngoài exFAT: publish xong phải `sync && sync` rồi RE-HASH từ đĩa.** Write-cache
+  từng làm cả loạt EPUB "verify PASS" (đọc từ cache) rồi biến mất sau ~1h. Chỉ tin
+  verify đọc lại toàn bộ bytes sau sync.
+
+Sau `fix_toc_junk`, rebuild **bằng `scan2ebook epub`** (build-only), KHÔNG bằng `all` —
+`all` luôn re-merge `work/ocr/*.md` → ghi đè `book.md` đã dọn (lỗi này đã tái diễn 3 lần
+trước khi thành quy tắc).
+
 ### Lưu ý về cost
 
 **Chi thực của một cuốn = tổng sổ `work/cost.json`** — pipeline tự ghi 1 entry mỗi lần tiêu tiền (pre-pass, mỗi pass OCR); `all` in "Chi phí cộng dồn cuốn này" cuối build. Đừng diễn giải dòng `cost~$` trong log: mỗi pass in cost riêng cho trang pass đó xử lý, **dòng cuối KHÔNG phải tổng** (thực đo một nhóm: lệch ~10%). Trang cache = $0 khi resume.

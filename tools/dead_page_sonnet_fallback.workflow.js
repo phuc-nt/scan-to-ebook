@@ -51,7 +51,8 @@ const RULES = `OCR RULES (sách tiếng Việt, chính tả trước 1975 có th
 TUYỆT ĐỐI CẤM:
 - KHÔNG kết luận trang "trùng/duplicate/thừa" rồi bỏ trống. Chỉ OCR đúng ảnh trước mặt.
 - KHÔNG so sánh với trang khác, KHÔNG suy luận về pipeline, KHÔNG gộp/bỏ.
-- Chỉ khi ảnh THỰC SỰ không có chữ nào (trang trắng vật lý) mới ghi đúng một dòng: (blank)
+- Chỉ khi ảnh THỰC SỰ không có chữ nào (trang trắng vật lý) mới ghi đúng một dòng: <!-- blank page -->
+  (HTML comment — vô hình trong EPUB, khớp BLANK_PLACEHOLDER của pipeline. KHÔNG ghi chữ "(blank)" trần — sẽ hiện ra cho người đọc.)
 
 File .md chỉ chứa Markdown đã transcribe — KHÔNG giải thích, KHÔNG \`\`\`markdown wrapper.`
 

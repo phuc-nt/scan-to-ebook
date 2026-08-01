@@ -115,6 +115,24 @@ Download and open in Books.app / Kindle to judge quality before spending anythin
 See [`samples/README.md`](samples/README.md) for the full input→output chain.
 These files are short excerpts included only to demonstrate OCR quality — see the [Legal](#legal) note.
 
+## What's new since the first release
+
+The first release (May 2026) was a 4-step script: OCR every page with Gemini
+(~$0.05/page), regex chapter split, pandoc, optional rclone upload — blank pages
+had to be patched by hand. Since then:
+
+| Area | First release | Now |
+| --- | --- | --- |
+| **Cost** | Gemini, ~$0.05/page | qwen3.7-plus default, **~$0.003/page (15× cheaper)**, same quality on hard corpora |
+| **OCR context** | page-by-page, no memory | **context pre-pass**: title/proper names/spelling/spreads/cover detected once, fed to every page |
+| **Input** | prepared image folder only | + **PDF** (scanned or broken-text-layer), **Google Drive links**, **HEIC/HEIF** iPhone photos |
+| **Pipelines** | prose only | + **manga EPUB3 fixed-layout RTL** (`scan2ebook manga`, $0 offline, no OCR) |
+| **Languages** | Vietnamese | + **Japanese first-class** (`--lang ja`: tategaki, RTL spreads) |
+| **Problem pages** | manual placeholder by hand | **self-healing**: blank pages auto-skipped, dead pages early-abort with a marked placeholder, single-page retry costs $0 extra |
+| **Tooling** | run and hope | `init` · `doctor` · `--smoke` cost preview · `--dry-run` · **`verify`** (zip-level EPUB check) · per-book **cost ledger** (`work/cost.json`) |
+| **Scale** | one book at a time | **batch tools**: N-lane parallel driver + TOC-junk cleaner, battle-tested on tens of thousands of pages |
+| **Automation** | interactive only | `--yes`, `--json`/`--json-lines`, stable exit codes — full [agent/CI path](docs/agents.md) |
+
 ## Documentation
 
 - [Product overview](docs/product-overview.md) — problem, audience, value, non-goals

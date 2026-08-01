@@ -399,9 +399,9 @@ def test_cost_accounting(tmp_path, monkeypatch):
             "usage": {"prompt_tokens": 1_000_000, "completion_tokens": 100_000},
         }
     monkeypatch.setattr(context_prepass, "_post_context_once", fake)
-    # qwen3.7-plus = $0.40/M in, $1.60/M out → 1M*0.4 + 0.1M*1.6 = 0.56
+    # qwen3.7-plus = $0.32/M in, $1.28/M out → 1M*0.32 + 0.1M*1.28 = 0.448
     res = context_prepass.run_prepass("k", "qwen/qwen3.7-plus", tmp_path, "*.png")
-    assert res["cost_usd"] == pytest.approx(0.40 + 0.16)
+    assert res["cost_usd"] == pytest.approx(0.32 + 0.128)
     # Gemini giá khác qua cùng bảng giá chung
     res2 = context_prepass.run_prepass(
         "k", "google/gemini-3.1-pro-preview", tmp_path, "*.png", out_dir=tmp_path / "g"

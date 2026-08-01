@@ -37,7 +37,8 @@ REQUEST_TIMEOUT_S = 90
 # cost; nếu model không có trong bảng, fallback giá DEFAULT_MODEL. Provider đổi
 # giá thì cập nhật ở đây (1 chỗ duy nhất, cả ocr lẫn context_prepass dùng chung).
 MODEL_PRICES: dict[str, tuple[float, float]] = {
-    "qwen/qwen3.7-plus": (0.40, 1.60),
+    "qwen/qwen3.7-plus": (0.32, 1.28),
+    "qwen/qwen3.7-flash": (0.03, 0.13),
     "google/gemini-3.1-pro-preview": (2.5, 10.0),
 }
 

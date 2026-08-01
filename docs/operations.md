@@ -2,9 +2,9 @@
 
 ## Cost management
 
-OpenRouter charge theo token in/out. Qwen 3.7-Plus (default) là $0.40/M input, $1.60/M output. **Số đo thực tế trên 41.191 trang (batch 3, 181 cuốn): ~$0,0033/trang, ~$0,75/cuốn** — sách 300 trang ≈ $1, nhóm ~14k trang ≈ $45–48. Gemini 3.1 Pro đắt ~15× ($0.05/trang), chỉ dùng backup cho trang Qwen chịu thua.
+OpenRouter charge theo token in/out. Qwen 3.7-Plus (default) là $0.40/M input, $1.60/M output. **Số đo thực tế trên hàng chục nghìn trang scan: ~$0,0033/trang, ~$0,75/cuốn** — sách 300 trang ≈ $1, một nhóm ~14k trang ≈ $45–48. Gemini 3.1 Pro đắt ~15× ($0.05/trang), chỉ dùng backup cho trang Qwen chịu thua.
 
-Pipeline in cost ước tính cuối stage 1 (dòng `cost~$` cuối log). Lưu ý: **dòng cost cuối mỗi cuốn KHÔNG phải tổng cộng dồn** — mỗi pass (all-1, retry, all-2) in cost riêng cho trang pass đó xử lý; chi thực = tổng mọi dòng cost mọi pass (group3: $48.43 thực vs $43.86 theo dòng cuối).
+Pipeline in cost ước tính cuối stage 1 (dòng `cost~$` cuối log). Lưu ý: **dòng cost cuối mỗi cuốn KHÔNG phải tổng cộng dồn** — mỗi pass (all-1, retry, all-2) in cost riêng cho trang pass đó xử lý; chi thực = tổng mọi dòng cost mọi pass (thực đo: dòng cuối hụt ~10%).
 
 `--workers` mặc định 12; chạy 1 cuốn đơn lẻ 12–24 đều ổn (verified 331 trang, 0 fail). Chạy nhiều sách song song xem section "Batch OCR" bên dưới — 192 concurrent trên 1 key vẫn không bị throttle. Trang text-dày thỉnh thoảng "stutter" (1 trang nổ 12k–25k output token, latency 200–450s) — với nhiều worker, trang nổ không khoá batch, cứ để nó chạy.
 
@@ -28,7 +28,7 @@ Hai loại trang "không ra text" đều được tự động hoá, không cầ
 
 **Trang trống thật** (bìa sau, divider): model trả rỗng + `finish_reason=stop` → pipeline tự ghi `<!-- blank page -->`, đếm là `blank` (KHÔNG phải fail), pass sau skip. Không retry trang trắng.
 
-**Trang chết deterministic** (provider trả rỗng/malformed y hệt mỗi lần): retry loop so sánh *error class* giữa các lần — cùng class lặp 2 lần → **early-abort** (không đợi hết retry), tự ghi `<!-- OCR FAILED (deterministic) — cần xử lý tay: <lý do> -->`. Trang vẫn đếm là `fail` (summary trung thực) nhưng có file `.md` size>0 nên **các pass sau skip, không ôm lại vòng retry**. Trước fix này, 1 trang chết kéo cả cuốn tới 8521s; sau fix, cuốn tệ nhất group3 chỉ 1966s.
+**Trang chết deterministic** (provider trả rỗng/malformed y hệt mỗi lần): retry loop so sánh *error class* giữa các lần — cùng class lặp 2 lần → **early-abort** (không đợi hết retry), tự ghi `<!-- OCR FAILED (deterministic) — cần xử lý tay: <lý do> -->`. Trang vẫn đếm là `fail` (summary trung thực) nhưng có file `.md` size>0 nên **các pass sau skip, không ôm lại vòng retry**. Trước fix này, 1 trang chết kéo cả cuốn tới ~2,4 giờ; sau fix, cuốn tệ nhất trong một nhóm lớn chỉ ~33 phút.
 
 Muốn thử OCR lại một trang có placeholder (trắng oan / muốn cứu trang chết): xoá file `work/ocr/page_NNN.md` tương ứng rồi rerun `scan2ebook all <slug>` — chỉ trang đó bị OCR lại, phần còn lại $0.
 
@@ -204,7 +204,7 @@ Pipeline detects + hints at install if absent.
 
 ## Batch OCR nhiều sách song song
 
-Khi phải OCR cả một hàng đợi lớn (hàng trăm cuốn PDF scan), không chạy tay từng cuốn. Chia thành các **đợt (batch)**, mỗi đợt tách thành **nhóm theo ngân sách** (vd ~$50/nhóm — giới hạn credit dễ kiểm soát), chạy 1 nhóm một lần và xác nhận credit giữa các nhóm. Quy trình dưới đây đã verified trên một đợt thực tế 181 cuốn / ~41k trang (~$0,0033/trang với qwen3.7-plus + `--dpi 72`).
+Khi phải OCR cả một hàng đợi lớn (hàng trăm cuốn PDF scan), không chạy tay từng cuốn. Chia thành các **đợt (batch)**, mỗi đợt tách thành **nhóm theo ngân sách** (vd ~$50/nhóm — giới hạn credit dễ kiểm soát), chạy 1 nhóm một lần và xác nhận credit giữa các nhóm. Quy trình dưới đây đã verified trên nhiều đợt thực tế quy mô hàng trăm cuốn (~$0,0033/trang với qwen3.7-plus + `--dpi 72`).
 
 ### Tổ chức workdir
 
@@ -231,7 +231,7 @@ Nguyên tắc thiết kế (`tools/batch_ocr_runner.py --help` tự đủ):
 - Mỗi cuốn: `init --from <pdf> --dpi 72 --author --title` (skip nếu đã có scans) → `all --yes` × 2 pass, giữa 2 pass chạy `ocr` retry (tự nạp context cache); pass `all` cuối tự bỏ pre-pass khi 0 trang cần OCR → sách bị moderation chặn ảnh mẫu vẫn tự ra EPUB.
 - Kết quả phân loại rõ: `DONE | DONE(dead=N) | WARN(no-epub) | WARN(init-fail) | STOP(402)` — không còn WARN hộp đen. `DONE(dead=N)` = EPUB build được nhưng THIẾU N trang (dead placeholder vô hình trong EPUB); muốn cứu: xoá `work/ocr/<trang>.md` rồi rerun `all --yes` (danh sách trang trong log `all` cuối).
 - **Circuit breaker 402 trong 1 cuốn**: trang đầu tiên dính 402 → các trang còn lại của cuốn bỏ qua tại chỗ (không bắn call chết từng trang), để trống cho lần resume sau nạp credit.
-- **8 lane × 24 worker = 192 concurrent trên 1 key là an toàn** — verified: 34 cuốn / ~14.6k trang trong 79 phút, speedup 7.2x, chỉ 2 lần 429 lẻ. `qwen3.7-plus` không throttle ở mức này.
+- **8 lane × 24 worker = 192 concurrent trên 1 key là an toàn** — verified: một nhóm ~14.6k trang chạy xong trong ~80 phút, speedup 7.2x, chỉ vài lần 429 lẻ. `qwen3.7-plus` không throttle ở mức này.
 - **`--dpi 72` khi scan nguồn ~1024px**: default 150 DPI upscale 2× vô ích, đắt hơn ~12%.
 - **HTTP 402 ở bất cứ lane nào → dừng nhận việc mới.** 402 = hết credit (KHÔNG phải lỗi sách). Nạp credit rồi rerun — OCR cache khiến resume chỉ làm trang còn thiếu, trang xong = $0.
 

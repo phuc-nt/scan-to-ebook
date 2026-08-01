@@ -47,3 +47,6 @@ docs/illustration-prompts/
 
 # Personal ops docs (local machine paths, drive layout, cross-repo coordination)
 docs/private/
+
+# Dev journals (narrate real scanning runs — local history, not for the public remote)
+docs/journals/

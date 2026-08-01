@@ -45,6 +45,16 @@ printf 'OPENROUTER_API_KEY=%s\n' "$OPENROUTER_API_KEY" > .env
 **Exit codes:** `0` success, `1` partial/failed pages, `2` user error. Runs are
 resumable, so retrying after a crash or a raised credit cap is cheap and safe.
 
+After the build, validate the artifact (don't trust exit codes alone):
+
+```bash
+.venv/bin/scan2ebook verify ~/scan2ebook/<slug> --json   # OK / TINY / BADZIP / MISSING
+```
+
+`verify` accepts a single `.epub`, one book-home, or a directory of book-homes
+(rc 0 only when every EPUB is OK). Real total spend per book is the sum of the
+`work/cost.json` ledger — the last `cost~$` log line is per-pass, not a total.
+
 ## 4. Manga (image pages → EPUB3 fixed-layout, no OCR)
 
 Different pipeline, different command. Scanned manga/comic pages become a

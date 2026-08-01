@@ -19,9 +19,11 @@ a PDF file, or a Google Drive file link — into an EPUB you can read in Books.a
 It runs each page through an OpenRouter vision model for OCR, cleans and merges the
 text with the Python standard library, and builds the EPUB with pandoc.
 
-It was built for **hard Vietnamese corpora** and verified with **zero OCR errors**
+It was built for **hard Vietnamese corpora** — verified with **zero OCR errors**
 on an early-Quốc-ngữ journal (Nam Phong, 1917 — 75 pages) and on a 152-image
-iPhone-scanned book (119 HEIC + 33 JPG). See the [samples](#ocr-model--samples)
+iPhone-scanned book (119 HEIC + 33 JPG) — and has since been battle-tested on
+scanned-PDF batches totalling **tens of thousands of pages** (old spelling,
+two-column magazines, war-era print). See the [samples](#ocr-model--samples)
 to judge the output before running your own book.
 
 ## Features
@@ -40,7 +42,20 @@ Two standalone pipelines:
   text layer) are rendered to per-page images and OCR'd.
 - **Cross-platform HEIC/HEIF** — iPhone photos auto-converted at import.
 - **Resumable & cost-gated** — already-OCR'd pages are skipped on re-run; a smoke
-  run OCRs 10 pages and estimates full cost before you commit.
+  run OCRs 10 pages and estimates full cost before you commit. A per-book cost
+  ledger (`work/cost.json`) records every paid pass — real total, not a guess.
+- **Self-healing problem pages** — truly blank pages become invisible placeholders
+  (not failures); deterministically-failing pages early-abort with a marked
+  placeholder instead of stalling the whole book, and can be retried individually
+  (delete the page's `.md`, re-run — the rest costs $0).
+- **Japanese first-class** — `--lang ja` switches to a dedicated vertical-text
+  (tategaki) prompt, right-to-left spread detection, and JA post-processing.
+- **Built-in EPUB verify** — `scan2ebook verify <path>` checks one book or a whole
+  folder of book-homes (OK / TINY / BADZIP / MISSING, JSON output available).
+- **Batch tools for large queues** — `tools/batch_ocr_runner.py` (N-lane parallel
+  driver with a shared queue and clear per-book result labels) and
+  `tools/fix_toc_junk.py` (safe TOC-junk cleanup); see
+  [Operations → Batch OCR](docs/operations.md#batch-ocr-nhiều-sách-song-song).
 - **Agent-friendly CLI** — `doctor` self-check, `--dry-run`, `--json` /
   `--json-lines`, and `--yes` for non-interactive runs.
 

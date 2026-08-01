@@ -72,7 +72,9 @@ Throttle upload nếu băng thông yếu (rclone default unlimited). Set qua fla
 
 ## Model swap
 
-Default model `qwen/qwen3.7-plus` (6/2026) là tối ưu nhất cho corpus Việt: rẻ ($0.004/page), nhanh, giữ chính tả cũ tốt. Khi cần override, có 2 cách.
+Default model `qwen/qwen3.7-plus` (6/2026) là tối ưu nhất cho corpus Việt: rẻ (~$0.0033/page đo thật), nhanh, giữ chính tả cũ tốt. Khi cần override, có 2 cách.
+
+**Quy tắc chọn model theo ngôn ngữ:** sách tiếng Việt → luôn dùng `qwen3.7-plus` (hoặc model đã verify giữ dấu). Chỉ hạ xuống model rẻ hơn (`qwen3.7-flash`) khi corpus **không dấu** — tiếng Anh/Pháp. Model rẻ tiết kiệm vài hào nhưng sai dấu tiếng Việt = sai nghĩa, chi phí sửa tay lớn hơn nhiều lần khoản tiết kiệm.
 
 Override per-run qua CLI flag.
 
@@ -86,7 +88,9 @@ Danh sách model đã test trên corpus Nam Phong 1917 (20 trang, 6/2026 benchma
 
 `qwen/qwen3.7-plus` — zero fail, $0.004/page (~0.004–0.0038 old-text). Default, recommended. Giữ nguyên chính tả cũ (chánh, nhời, văn-chương).
 
-`google/gemini-3.1-pro-preview` — quality tương đương Qwen nhưng gặp vấn đề trang dày (blank page, token spiral). ~15× đắt ($0.05/page). Backup nếu Qwen fail trang cụ thể.
+`qwen/qwen3.7-flash` — **CHỈ dùng cho sách KHÔNG DẤU (tiếng Anh/Pháp…), KHÔNG dùng cho tiếng Việt.** Rẻ hơn plus 4,3× ($0.00077/page đo thật) và zero fail, nhưng benchmark 6 thể loại / 48 trang / 10.299 từ (8/2026): **7,5 lỗi/trang, 96,5% chính xác — 74,9% số lỗi là SAI DẤU** (`viễn`→`viền`, `bể`→`bè`, `triều`→`triệu`, `nghỉ`→`nghĩ`). Tiếng Việt sai dấu = sai nghĩa, không phải nhiễu vô hại; sách 300 trang ⇒ ~2.250 lỗi phải sửa tay, không đáng đổi lấy $0,77. Hợp lý cho pre-pass rẻ (dò trang trắng / bố cục) hoặc corpus không dấu.
+
+`google/gemini-3.1-pro-preview` — quality tương đương Qwen nhưng gặp vấn đề trang dày (blank page, token spiral). ~15× đắt ($0.05/page). Backup nếu Qwen fail trang cụ thể — cũng là model swap để cứu dead page (moderation/empty).
 
 `anthropic/claude-opus-4` — không nằm trong benchmark này; rất đắt, chỉ cân nhắc khi sách cực khó (corrupt scan, calligraphy) và verify trước.
 

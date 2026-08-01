@@ -103,6 +103,13 @@ no read-failures. A typical 100-page book costs **≈ $0.30–0.40**. The pipeli
 model-agnostic — any OpenRouter vision model works via `--model` or `OCR_MODEL`;
 see [Operations → Model swap](docs/operations.md#model-swap) for the full benchmark.
 
+**Don't downgrade to a cheaper model for diacritic languages.** `qwen/qwen3.7-flash`
+is ~4× cheaper and never fails a page, but across 6 genres (48 pages, 10k words) it
+averaged **7.5 errors/page — 75% of them wrong Vietnamese tone marks** (`bể`→`bè`,
+`triều`→`triệu`), and a wrong tone is a wrong word. Cheap models are fine for
+**undiacriticized text (English/French)** or a blank-page pre-pass, not for
+Vietnamese content.
+
 Three finished EPUBs below — each a 20-page clean-cache run on `qwen/qwen3.7-plus`.
 Download and open in Books.app / Kindle to judge quality before spending anything:
 
